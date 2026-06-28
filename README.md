@@ -48,6 +48,12 @@ FINNHUB_API_KEY=你的 Finnhub API Key
 
 如果没有配置 key，页面会显示友好提示，不会崩溃。
 
+## 策略回测
+
+「策略回测」页面使用 yfinance 免费历史日 K 数据，回测「踩5日线穿10日线放量」信号，并对比纪律A和纪律B的胜率、盈亏比、期望值、最大回撤和累计收益曲线。
+
+回测股票池放在 `src/config.py` 的 `BACKTEST_STOCK_UNIVERSE`，以标普500 + 纳斯达克100常见成分股为基础，并在运行时用当前 market cap 近似筛选 10 亿美金以上股票。回测结果仅供参考，不构成投资建议。
+
 ## 密钥说明
 
 真实 API key 必须配置在 Streamlit Secrets 或本地环境变量中，不要提交到 GitHub 仓库。
