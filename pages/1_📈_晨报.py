@@ -1,6 +1,15 @@
 """晨报页面：M1 阶段展示 Finnhub gap scanner。"""
 
+from pathlib import Path
+import sys
+
 import streamlit as st
+
+
+# Streamlit Cloud 有时会以 pages/ 作为脚本上下文，显式加入项目根目录可保证 src 包可导入。
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import DEFAULT_STOCK_UNIVERSE
 from src.data.finnhub_client import QuoteRow, fetch_gap_scanner, get_finnhub_api_key

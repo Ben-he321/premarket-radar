@@ -1,7 +1,16 @@
 """板块雷达页面。"""
 
+from pathlib import Path
+import sys
+
 import pandas as pd
 import streamlit as st
+
+
+# Streamlit Cloud 有时会以 pages/ 作为脚本上下文，显式加入项目根目录可保证 src 包可导入。
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data.finnhub_client import get_finnhub_api_key
 from src.scoring.sector_radar import build_sector_radar
