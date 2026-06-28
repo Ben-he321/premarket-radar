@@ -19,6 +19,17 @@ TEXT = "#E5E7EB"
 TEXT_MUTED = "#94A3B8"
 TEXT_DIM = "#64748B"
 
+__all__ = [
+    "CYAN",
+    "GREEN",
+    "RED",
+    "inject_global_styles",
+    "metric_card",
+    "prepare_line_chart_data",
+    "render_safe_line_chart",
+    "signed_color",
+]
+
 
 def inject_global_styles() -> None:
     """注入全局 CSS，让所有页面拥有统一的深色金融终端质感。"""
