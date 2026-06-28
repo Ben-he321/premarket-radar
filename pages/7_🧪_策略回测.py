@@ -43,6 +43,28 @@ def display_metrics_table(metrics_df: pd.DataFrame) -> None:
     st.dataframe(display_df, use_container_width=True, hide_index=True)
 
 
+def prepare_equity_chart(equity_curve_df: pd.DataFrame) -> pd.DataFrame:
+    """把收益曲线整理成 st.line_chart 可稳定渲染的数值型宽表。"""
+
+    required_columns = {"交易序号", "纪律", "累计收益"}
+    if equity_curve_df.empty or not required_columns.issubset(equity_curve_df.columns):
+        return pd.DataFrame()
+
+    clean_df = equity_curve_df[list(required_columns)].copy()
+    clean_df["交易序号"] = pd.to_numeric(clean_df["交易序号"], errors="coerce")
+    clean_df["累计收益"] = pd.to_numeric(clean_df["累计收益"], errors="coerce")
+    clean_df = clean_df.dropna(subset=["交易序号", "纪律", "累计收益"])
+    if clean_df.empty:
+        return pd.DataFrame()
+
+    clean_df["交易序号"] = clean_df["交易序号"].astype(int)
+    chart_df = clean_df.pivot_table(index="交易序号", columns="纪律", values="累计收益", aggfunc="last").sort_index()
+    chart_df = chart_df.apply(pd.to_numeric, errors="coerce")
+    chart_df = chart_df.replace([float("inf"), float("-inf")], pd.NA).dropna(axis=1, how="all")
+    chart_df.columns.name = None
+    return chart_df
+
+
 def build_plain_summary(metrics_df: pd.DataFrame) -> str:
     """生成大白话总结。"""
 
@@ -103,11 +125,11 @@ if result:
     display_metrics_table(metrics_df)
 
     st.subheader("累计收益曲线")
-    if not equity_curve_df.empty:
-        chart_df = equity_curve_df.pivot(index="交易序号", columns="纪律", values="累计收益")
+    chart_df = prepare_equity_chart(equity_curve_df)
+    if not chart_df.empty:
         st.line_chart(chart_df, use_container_width=True)
     else:
-        st.info("暂无收益曲线。")
+        st.info("暂无可绘制的收益曲线，可能是有效交易太少或数据源暂时返回异常。")
 
     st.subheader("按市值分组对比")
     if not group_metrics_df.empty:
