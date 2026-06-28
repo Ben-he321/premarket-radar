@@ -46,7 +46,7 @@ def display_metrics_table(metrics_df: pd.DataFrame) -> None:
 
 
 def prepare_equity_chart(equity_curve_df: pd.DataFrame) -> pd.DataFrame:
-    """把收益曲线整理成 st.line_chart 可稳定渲染的数值型宽表。"""
+    """把收益曲线整理成安全图表函数可渲染的数值型宽表。"""
 
     required_columns = {"交易序号", "纪律", "累计收益"}
     if equity_curve_df.empty or not required_columns.issubset(equity_curve_df.columns):
