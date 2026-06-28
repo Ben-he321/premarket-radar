@@ -14,9 +14,11 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.data.finnhub_client import get_finnhub_api_key
 from src.scoring.sector_radar import build_sector_radar
+from src.ui.theme import inject_global_styles
 
 
 st.set_page_config(page_title="板块雷达", page_icon="📡", layout="centered")
+inject_global_styles()
 
 st.title("板块雷达")
 st.caption("M2：先找强势板块，再找板块龙头，最后找板块内跟风候选。")
