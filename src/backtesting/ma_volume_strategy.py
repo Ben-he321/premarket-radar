@@ -195,60 +195,72 @@ def run_strategy_backtest(tickers: list[str], period: str = "2y", progress_callb
             progress_callback(0.35 + index / total * 0.6, f"正在回测：{ticker}")
 
     trades_df = pd.DataFrame(trades)
-    return {
-        "market_cap_df": market_cap_df,
-        "trades_df": trades_df,
-        "metrics_df": summarize_metrics(trades_df),
-        "group_metrics_df": summarize_group_metrics(trades_df),
-        "equity_curve_df": build_equity_curves(trades_df),
-        "skipped": skipped,
-    }
+    return {"market_cap_df": market_cap_df, "trades_df": trades_df, "metrics_df": summarize_metrics(trades_df), "group_metrics_df": summarize_group_metrics(trades_df), "equity_curve_df": build_equity_curves(trades_df), "skipped": skipped}
+
+
+def _clean_returns(returns: pd.Series) -> pd.Series:
+    """清洗收益率，避免非数值或坏数据污染图表和指标。"""
+
+    clean_returns = pd.to_numeric(returns, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    return clean_returns.clip(lower=-0.95)
 
 
 def _max_drawdown(returns: pd.Series) -> float:
-    """用逐笔收益曲线估算最大回撤。"""
+    """用逐笔收益曲线估算最大回撤，并防止坏数据打出 -100%。"""
 
-    if returns.empty:
+    clean_returns = _clean_returns(returns)
+    if clean_returns.empty:
         return 0.0
-    equity = (1 + returns).cumprod()
+    equity = (1 + clean_returns).cumprod()
+    if equity.empty or float(equity.iloc[0]) <= 0:
+        return 0.0
     drawdown = equity / equity.cummax() - 1
-    return float(drawdown.min())
+    return max(float(drawdown.min()), -0.95)
 
 
 def summarize_metrics(trades_df: pd.DataFrame) -> pd.DataFrame:
     """按交易纪律汇总胜率、盈亏比、期望值等指标。"""
 
-    if trades_df.empty:
+    if trades_df.empty or "收益率" not in trades_df.columns or "纪律" not in trades_df.columns:
         return pd.DataFrame()
     rows: list[dict[str, object]] = []
     for discipline, group in trades_df.groupby("纪律", sort=False):
-        returns = group["收益率"].astype(float)
+        returns = _clean_returns(group["收益率"])
+        if returns.empty:
+            continue
         wins = returns[returns > 0]
         losses = returns[returns <= 0]
         avg_win = float(wins.mean()) if not wins.empty else 0.0
         avg_loss = float(losses.mean()) if not losses.empty else 0.0
-        rows.append({"纪律": discipline, "触发信号总次数": int(len(group)), "胜率": float((returns > 0).mean()), "平均盈利%": avg_win, "平均亏损%": avg_loss, "盈亏比": avg_win / abs(avg_loss) if avg_loss < 0 else 0.0, "期望值": float(returns.mean()), "最大回撤": _max_drawdown(returns)})
+        rows.append({"纪律": discipline, "触发信号总次数": int(len(returns)), "胜率": float((returns > 0).mean()), "平均盈利%": avg_win, "平均亏损%": avg_loss, "盈亏比": avg_win / abs(avg_loss) if avg_loss < 0 else 0.0, "期望值": float(returns.mean()), "最大回撤": _max_drawdown(returns)})
     return pd.DataFrame(rows)
 
 
 def summarize_group_metrics(trades_df: pd.DataFrame) -> pd.DataFrame:
     """按市值分组对比策略表现。"""
 
-    if trades_df.empty:
+    if trades_df.empty or "收益率" not in trades_df.columns or "纪律" not in trades_df.columns or "市值分组" not in trades_df.columns:
         return pd.DataFrame()
     rows: list[dict[str, object]] = []
     for (discipline, market_group), group in trades_df.groupby(["纪律", "市值分组"], sort=False):
-        returns = group["收益率"].astype(float)
-        rows.append({"纪律": discipline, "市值分组": market_group, "交易数": int(len(group)), "胜率": float((returns > 0).mean()), "期望值": float(returns.mean()), "最大回撤": _max_drawdown(returns)})
+        returns = _clean_returns(group["收益率"])
+        if returns.empty:
+            continue
+        rows.append({"纪律": discipline, "市值分组": market_group, "交易数": int(len(returns)), "胜率": float((returns > 0).mean()), "期望值": float(returns.mean()), "最大回撤": _max_drawdown(returns)})
     return pd.DataFrame(rows)
 
 
 def build_equity_curves(trades_df: pd.DataFrame) -> pd.DataFrame:
     """构造简单累计收益曲线，按交易出现顺序复利。"""
 
-    if trades_df.empty:
+    if trades_df.empty or "收益率" not in trades_df.columns or "纪律" not in trades_df.columns:
         return pd.DataFrame()
     curves: list[pd.DataFrame] = []
     for discipline, group in trades_df.groupby("纪律", sort=False):
-        curves.append(pd.DataFrame({"交易序号": range(1, len(group) + 1), "累计收益": (1 + group["收益率"].astype(float)).cumprod() - 1, "纪律": discipline}))
+        returns = _clean_returns(group["收益率"])
+        if returns.empty:
+            continue
+        curves.append(pd.DataFrame({"交易序号": range(1, len(returns) + 1), "累计收益": (1 + returns).cumprod() - 1, "纪律": discipline}))
+    if not curves:
+        return pd.DataFrame()
     return pd.concat(curves, ignore_index=True)
