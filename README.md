@@ -64,6 +64,8 @@ FINNHUB_API_KEY=你的 Finnhub API Key
 
 「影子组合」和「复盘报告」页面使用 Supabase 保存虚拟账户、持仓、成交和每日复盘。代码不会保存、打印或展示你的 Supabase key。
 
+为了兼容 Streamlit Community Cloud 的 Python 3.14 环境，项目通过 Supabase REST API + `requests` 连接数据库，不依赖 `supabase-py`。
+
 Streamlit Community Cloud 部署时，请在 App 的 `Secrets` 中增加：
 
 ```toml
