@@ -14,9 +14,11 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.backtesting.ma_volume_strategy import run_strategy_backtest
 from src.config import BACKTEST_STOCK_UNIVERSE
+from src.ui.theme import inject_global_styles
 
 
 st.set_page_config(page_title="策略回测", page_icon="🧪", layout="centered")
+inject_global_styles()
 
 st.title("策略回测")
 st.caption("插队任务：回测「踩5日线穿10日线放量」信号，对比纪律A和纪律B。")

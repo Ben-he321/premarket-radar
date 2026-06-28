@@ -13,9 +13,11 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.config import DEFAULT_STOCK_UNIVERSE
 from src.data.finnhub_client import QuoteRow, fetch_gap_scanner, get_finnhub_api_key
+from src.ui.theme import inject_global_styles
 
 
 st.set_page_config(page_title="晨报", page_icon="📈", layout="centered")
+inject_global_styles()
 
 st.title("晨报")
 st.caption("M1：真实盘前/最新行情 gap scanner，数据来自 Finnhub。")
