@@ -18,7 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data.finnhub_client import FINNHUB_BASE_URL, REQUEST_TIMEOUT_SECONDS, get_finnhub_api_key
-from src.ui.theme import inject_global_styles, signed_color
+from src.ui.theme import inject_global_styles, render_safe_line_chart, signed_color
 
 
 st.set_page_config(page_title="个股查询", page_icon="🔍", layout="centered")
@@ -194,7 +194,8 @@ def load_stock_snapshot(ticker: str, api_key: str | None) -> dict[str, object]:
 
     chart_df = pd.DataFrame()
     if not close.empty:
-        chart_df = close.tail(30).to_frame(name="收盘价")
+        chart_series = pd.to_numeric(close.tail(30), errors="coerce").dropna().astype(float)
+        chart_df = chart_series.to_frame(name="收盘价")
         chart_df.index.name = "日期"
 
     return {
@@ -384,10 +385,7 @@ else:
 
         st.subheader("近 30 日价格走势")
         chart_df = snapshot["chart_df"]
-        if isinstance(chart_df, pd.DataFrame) and not chart_df.empty:
-            st.line_chart(chart_df, use_container_width=True)
-        else:
-            st.info("暂无足够历史数据绘制近 30 日走势。")
+        render_safe_line_chart(chart_df, "暂无足够历史数据绘制近 30 日走势。")
 
         st.subheader("预留模块")
         st.markdown(
