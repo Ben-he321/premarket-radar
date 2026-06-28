@@ -59,3 +59,30 @@ FINNHUB_API_KEY=你的 Finnhub API Key
 真实 API key 必须配置在 Streamlit Secrets 或本地环境变量中，不要提交到 GitHub 仓库。
 
 `.env.example` 只提供将来可能需要的 key 名称模板，所有值必须保持为空。
+
+## Supabase 与影子组合
+
+「影子组合」和「复盘报告」页面使用 Supabase 保存虚拟账户、持仓、成交和每日复盘。代码不会保存、打印或展示你的 Supabase key。
+
+Streamlit Community Cloud 部署时，请在 App 的 `Secrets` 中增加：
+
+```toml
+SUPABASE_URL = "你的 Supabase Project URL"
+SUPABASE_KEY = "你的 Supabase anon/public key"
+```
+
+本地开发时，也可以使用环境变量：
+
+```bash
+SUPABASE_URL=你的 Supabase Project URL
+SUPABASE_KEY=你的 Supabase anon/public key
+```
+
+首次使用前，请打开 Supabase 项目的 SQL Editor，复制并执行仓库根目录的 `supabase_schema.sql`。该 SQL 会创建：
+
+- `shadow_account`：虚拟账户状态（现金、持仓市值、总权益、日期）
+- `shadow_positions`：当前持仓（ticker、买入价、数量、买入日期、止损位、策略标签）
+- `shadow_trades`：历史成交记录（ticker、买/卖、价格、数量、日期、盈亏、理由/标签）
+- `daily_report`：每日复盘报告（日期、当日盈亏、操作记录、问题分析文本）
+
+如果没有配置 Supabase，相关页面会显示中文提示，不会崩溃。当前版本只搭建影子组合读写框架，自动交易引擎会在后续阶段接入。
