@@ -38,3 +38,18 @@ PAYC HSIC MTCH NWSA GL WYNN AAL APA MKTX PNW FOXA FOX MOS CZR BWA HAS FRT MGM IV
 ENPH ETSY NCLH DAY SOLV SW CPAY AIZ BEN CRL DVA ERIE FDS HII HRL LW MHK RJF SMCI TRMB
 UHS WBA WMT APO KKR COIN PLTR SNOW NET OKTA U AFRM HOOD SOFI MSTR MARA RIOT CELH CAVA DELL
 """.split()
+
+# M2 板块雷达配置：ETF 用来近似代表板块强弱，成分股用来寻找龙头和跟风票。
+# 后续想增删板块，只需要改这里的 ETF 和 tickers。
+SECTOR_RADAR_CONFIG = {
+    "半导体": {"etf": "SMH", "tickers": ["NVDA", "AMD", "AVGO", "TSM", "MU", "ARM", "ASML", "AMAT", "LRCX", "KLAC", "MRVL", "QCOM", "INTC", "ON"]},
+    "AI软件": {"etf": "IGV", "tickers": ["MSFT", "PLTR", "SNOW", "DDOG", "MDB", "CRWD", "NOW", "ADBE", "CRM", "PATH", "AI", "S"]},
+    "网络安全": {"etf": "CIBR", "tickers": ["CRWD", "PANW", "FTNT", "ZS", "OKTA", "NET", "S", "TENB", "CYBR", "CHKP"]},
+    "生物科技": {"etf": "XBI", "tickers": ["REGN", "VRTX", "AMGN", "GILD", "BIIB", "MRNA", "BMRN", "TECH", "INCY", "ALNY"]},
+    "能源": {"etf": "XLE", "tickers": ["XOM", "CVX", "COP", "SLB", "EOG", "MPC", "PSX", "VLO", "OXY", "HAL"]},
+    "金融": {"etf": "XLF", "tickers": ["JPM", "BAC", "WFC", "GS", "MS", "C", "BLK", "SCHW", "AXP", "COF"]},
+    "科技": {"etf": "XLK", "tickers": ["AAPL", "MSFT", "NVDA", "AVGO", "ORCL", "CRM", "ADBE", "AMD", "QCOM", "INTC"]},
+    "新能源": {"etf": "TAN", "tickers": ["FSLR", "ENPH", "SEDG", "RUN", "NXT", "ARRY", "SHLS", "BE", "PLUG", "TSLA"]},
+    "量子计算": {"etf": "QTUM", "tickers": ["IBM", "GOOG", "MSFT", "NVDA", "IONQ", "RGTI", "QBTS", "QUBT", "ARQQ", "HON"]},
+    "云计算": {"etf": "SKYY", "tickers": ["AMZN", "MSFT", "GOOGL", "NET", "SNOW", "DDOG", "MDB", "NOW", "ORCL", "CRM"]},
+}
