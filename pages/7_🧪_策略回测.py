@@ -14,7 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.backtesting.ma_volume_strategy import run_strategy_backtest
 from src.config import BACKTEST_STOCK_UNIVERSE
-from src.ui.theme import inject_global_styles
+from src.ui.theme import inject_global_styles, render_safe_line_chart
 
 
 st.set_page_config(page_title="策略回测", page_icon="🧪", layout="centered")
@@ -128,10 +128,7 @@ if result:
 
     st.subheader("累计收益曲线")
     chart_df = prepare_equity_chart(equity_curve_df)
-    if not chart_df.empty:
-        st.line_chart(chart_df, use_container_width=True)
-    else:
-        st.info("暂无可绘制的收益曲线，可能是有效交易太少或数据源暂时返回异常。")
+    render_safe_line_chart(chart_df, "暂无可绘制的收益曲线，可能是有效交易太少或数据源暂时返回异常。")
 
     st.subheader("按市值分组对比")
     if not group_metrics_df.empty:

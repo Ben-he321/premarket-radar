@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 
+import pandas as pd
 import streamlit as st
 
 
@@ -245,3 +246,57 @@ def signed_color(value: float) -> str:
     """按涨跌返回柔和红绿。"""
 
     return GREEN if value >= 0 else RED
+
+
+def prepare_line_chart_data(data: object) -> pd.DataFrame:
+    """把图表数据整理成 st.line_chart 可稳定渲染的纯数值型 DataFrame。"""
+
+    if data is None:
+        return pd.DataFrame()
+
+    if isinstance(data, pd.Series):
+        chart_df = data.to_frame(name=data.name or "数值")
+    elif isinstance(data, pd.DataFrame):
+        chart_df = data.copy()
+    else:
+        try:
+            chart_df = pd.DataFrame(data)
+        except Exception:
+            return pd.DataFrame()
+
+    if chart_df.empty:
+        return pd.DataFrame()
+
+    # Streamlit 图表对混合类型和全空列比较敏感，这里统一转成 float。
+    for column in chart_df.columns:
+        chart_df[column] = pd.to_numeric(chart_df[column], errors="coerce")
+
+    chart_df = chart_df.replace([float("inf"), float("-inf")], pd.NA)
+    chart_df = chart_df.dropna(axis=1, how="all").dropna(axis=0, how="all")
+    if chart_df.empty:
+        return pd.DataFrame()
+
+    # 索引尽量保留日期；如果不是日期也不强制失败，回测页的交易序号也可以作为索引。
+    if not isinstance(chart_df.index, pd.DatetimeIndex):
+        parsed_index = pd.to_datetime(chart_df.index, errors="coerce")
+        if parsed_index.notna().sum() == len(parsed_index):
+            chart_df.index = parsed_index
+
+    if isinstance(chart_df.index, pd.DatetimeIndex):
+        chart_df.index = chart_df.index.tz_localize(None) if chart_df.index.tz is not None else chart_df.index
+        chart_df = chart_df.sort_index()
+
+    chart_df.columns = [str(column) for column in chart_df.columns]
+    return chart_df.astype(float)
+
+
+def render_safe_line_chart(data: object, empty_message: str = "暂无可绘制的图表数据。") -> bool:
+    """安全渲染折线图；无有效数值时显示中文提示并返回 False。"""
+
+    chart_df = prepare_line_chart_data(data)
+    if chart_df.empty:
+        st.info(empty_message)
+        return False
+
+    st.line_chart(chart_df, use_container_width=True)
+    return True
