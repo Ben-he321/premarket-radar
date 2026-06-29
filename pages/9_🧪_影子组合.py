@@ -101,9 +101,22 @@ else:
     with st.spinner("自动引擎正在检查影子组合..."):
         engine_result = run_shadow_engine(client, api_key, account_rows, positions, trades, daily_reports)
 
+st.subheader("市场总闸与引擎决策")
+st.markdown(
+    "<div class='pmr-grid'>"
+    + metric_card("当前市场状态", engine_result.market_label, "来自首页 market_temperature 总闸", engine_result.market_signal)
+    + metric_card("新开仓纪律", engine_result.decision_summary, "先看市场，再看板块，再看个股", "自上而下")
+    + metric_card("本次操作", f"买入 {engine_result.buys} / 卖出 {engine_result.sells}", "当天只自动执行一次", "防重复")
+    + "</div>",
+    unsafe_allow_html=True,
+)
+
+st.markdown("**本次操作记录**")
 if engine_result.messages:
     for message in engine_result.messages:
         st.info(message)
+else:
+    st.info("暂无操作记录。")
 if engine_result.errors:
     for message in engine_result.errors:
         st.warning(message)
@@ -224,4 +237,4 @@ render_rows_table(
 )
 
 st.subheader("自动交易引擎")
-st.info("🚧 建设中：明天接入真实候选股、risk filter、买卖规则后，这里会自动写入影子组合。当前版本只提供数据库读写框架。")
+st.info("当前自动引擎会先读取市场情绪总闸，再按 进攻 / 中性 / 防守 三档纪律决定是否从板块雷达虚拟开仓。")
