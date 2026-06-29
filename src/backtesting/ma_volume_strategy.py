@@ -6,7 +6,8 @@ from typing import Callable
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
+
+from src.data.safe_yfinance import safe_download, safe_fast_info
 
 
 MARKET_CAP_MIN = 1_000_000_000
@@ -26,10 +27,8 @@ def get_market_cap(ticker: str) -> int | None:
     """读取当前市值；失败返回 None，回测时自动跳过。"""
 
     try:
-        info = yf.Ticker(ticker).fast_info
-        market_cap = getattr(info, "market_cap", None)
-        if market_cap is None and isinstance(info, dict):
-            market_cap = info.get("market_cap")
+        info = safe_fast_info(ticker)
+        market_cap = info.get("market_cap")
         return int(market_cap) if market_cap else None
     except Exception:
         return None
@@ -56,11 +55,10 @@ def download_price_data(tickers: list[str], period: str = "2y") -> dict[str, pd.
     if not tickers:
         return {}
 
-    raw = yf.download(tickers=tickers, period=period, interval="1d", auto_adjust=False, group_by="ticker", progress=False, threads=True)
     data: dict[str, pd.DataFrame] = {}
     for ticker in tickers:
         try:
-            frame = raw[ticker].copy() if isinstance(raw.columns, pd.MultiIndex) else raw.copy()
+            frame = safe_download(ticker, period=period, interval="1d")
             frame = frame.rename(columns=str.title)
             required = ["Open", "High", "Low", "Close", "Volume"]
             if frame.empty or not all(column in frame.columns for column in required):

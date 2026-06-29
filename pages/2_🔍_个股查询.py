@@ -9,7 +9,6 @@ import sys
 import pandas as pd
 import requests
 import streamlit as st
-import yfinance as yf
 
 
 # Streamlit Cloud 和本地运行时的工作目录可能不同，显式加入项目根目录。
@@ -18,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data.finnhub_client import FINNHUB_BASE_URL, REQUEST_TIMEOUT_SECONDS, get_finnhub_api_key
+from src.data.safe_yfinance import safe_history, safe_info
 from src.ui.theme import inject_global_styles, render_safe_line_chart, signed_color
 
 
@@ -102,7 +102,7 @@ def load_yfinance_history(ticker: str) -> pd.DataFrame:
     """读取近 3 个月日线，用于技术位和 30 日小图表。"""
 
     try:
-        history = yf.Ticker(ticker).history(period="3mo", interval="1d", auto_adjust=False)
+        history = safe_history(ticker, period="3mo", interval="1d")
         if history.empty:
             return pd.DataFrame()
         history = history.reset_index()
@@ -118,8 +118,7 @@ def load_yfinance_info(ticker: str) -> dict[str, object]:
     """读取 yfinance 基本面信息；失败时返回空字典。"""
 
     try:
-        info = yf.Ticker(ticker).get_info()
-        return info if isinstance(info, dict) else {}
+        return safe_info(ticker)
     except Exception:
         return {}
 

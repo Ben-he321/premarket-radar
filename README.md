@@ -87,4 +87,6 @@ SUPABASE_KEY=你的 Supabase anon/public key
 - `shadow_trades`：历史成交记录（ticker、买/卖、价格、数量、日期、盈亏、理由/标签）
 - `daily_report`：每日复盘报告（日期、当日盈亏、操作记录、问题分析文本）
 
-如果没有配置 Supabase，相关页面会显示中文提示，不会崩溃。当前版本只搭建影子组合读写框架，自动交易引擎会在后续阶段接入。
+如果没有配置 Supabase，相关页面会显示中文提示，不会崩溃。当前版本已经接入简化版影子组合自动引擎：打开「影子组合」页时会检查止损/到期卖出，并尝试从板块雷达候选里虚拟买入少量标的。
+
+如果「影子组合」页面出现 `permission denied for table shadow_positions` 或 `shadow_trades`，说明 Supabase 表还没有开放给 `anon` key 访问。请重新打开 Supabase SQL Editor，复制并执行 `supabase_schema.sql` 末尾的“权限修复”SQL 段，它会给 `anon` 和 `authenticated` 角色授予 `shadow_account`、`shadow_positions`、`shadow_trades`、`daily_report` 四张表的读写权限，并创建对应 RLS policy。

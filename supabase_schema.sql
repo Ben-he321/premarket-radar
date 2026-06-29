@@ -52,3 +52,46 @@ create index if not exists idx_shadow_account_date on shadow_account(account_dat
 create index if not exists idx_shadow_positions_ticker on shadow_positions(ticker);
 create index if not exists idx_shadow_trades_date on shadow_trades(trade_date desc);
 create index if not exists idx_daily_report_date on daily_report(report_date desc);
+
+-- 权限修复：允许 Streamlit 使用 anon key 通过 REST API 读写影子组合数据。
+-- 使用方法：如果表已经创建过，也可以单独复制本段到 Supabase SQL Editor 执行。
+grant usage on schema public to anon, authenticated;
+
+grant select, insert, update, delete on table shadow_account to anon, authenticated;
+grant select, insert, update, delete on table shadow_positions to anon, authenticated;
+grant select, insert, update, delete on table shadow_trades to anon, authenticated;
+grant select, insert, update, delete on table daily_report to anon, authenticated;
+
+grant usage, select on sequence shadow_account_id_seq to anon, authenticated;
+grant usage, select on sequence shadow_positions_id_seq to anon, authenticated;
+grant usage, select on sequence shadow_trades_id_seq to anon, authenticated;
+grant usage, select on sequence daily_report_id_seq to anon, authenticated;
+
+alter table shadow_account enable row level security;
+alter table shadow_positions enable row level security;
+alter table shadow_trades enable row level security;
+alter table daily_report enable row level security;
+
+drop policy if exists shadow_account_anon_all on shadow_account;
+create policy shadow_account_anon_all on shadow_account
+    for all to anon, authenticated
+    using (true)
+    with check (true);
+
+drop policy if exists shadow_positions_anon_all on shadow_positions;
+create policy shadow_positions_anon_all on shadow_positions
+    for all to anon, authenticated
+    using (true)
+    with check (true);
+
+drop policy if exists shadow_trades_anon_all on shadow_trades;
+create policy shadow_trades_anon_all on shadow_trades
+    for all to anon, authenticated
+    using (true)
+    with check (true);
+
+drop policy if exists daily_report_anon_all on daily_report;
+create policy daily_report_anon_all on daily_report
+    for all to anon, authenticated
+    using (true)
+    with check (true);

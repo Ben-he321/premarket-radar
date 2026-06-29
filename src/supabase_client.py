@@ -9,9 +9,12 @@ from typing import Any
 import requests
 
 
+SUPABASE_TIMEOUT_SECONDS = 15
+
+
 @dataclass(frozen=True)
 class SupabaseStatus:
-    """Supabase 连接状态，页面只展示状态和原因，不展示密钥。"""
+    """Supabase 操作状态，页面只展示状态和原因，不展示密钥。"""
 
     ok: bool
     message: str
@@ -115,7 +118,7 @@ def fetch_rows(
             f"{client.rest_url}/{table_name}",
             headers=client.headers,
             params=params,
-            timeout=15,
+            timeout=SUPABASE_TIMEOUT_SECONDS,
         )
         if not response.ok:
             return [], SupabaseStatus(ok=False, message=f"读取 {table_name} 失败：{_parse_error(response)}")
@@ -139,7 +142,7 @@ def insert_row(client: SupabaseRestClient | None, table_name: str, payload: dict
             f"{client.rest_url}/{table_name}",
             headers=headers,
             json=payload,
-            timeout=15,
+            timeout=SUPABASE_TIMEOUT_SECONDS,
         )
         if not response.ok:
             return SupabaseStatus(ok=False, message=f"写入 {table_name} 失败：{_parse_error(response)}")
@@ -168,10 +171,34 @@ def upsert_row(
             headers=headers,
             params=params,
             json=payload,
-            timeout=15,
+            timeout=SUPABASE_TIMEOUT_SECONDS,
         )
         if not response.ok:
             return SupabaseStatus(ok=False, message=f"保存 {table_name} 失败：{_parse_error(response)}")
         return SupabaseStatus(ok=True, message="保存成功")
     except requests.RequestException as exc:
         return SupabaseStatus(ok=False, message=f"保存 {table_name} 失败：{exc}")
+
+
+def delete_rows(client: SupabaseRestClient | None, table_name: str, filters: dict[str, str]) -> SupabaseStatus:
+    """按等值条件删除记录；影子组合卖出后用来移除持仓。"""
+
+    if client is None:
+        return SupabaseStatus(ok=False, message="Supabase 未连接，暂时无法删除数据。")
+    if not filters:
+        return SupabaseStatus(ok=False, message="删除失败：缺少过滤条件。")
+
+    params = {key: f"eq.{value}" for key, value in filters.items()}
+    headers = {**client.headers, "Prefer": "return=representation"}
+    try:
+        response = requests.delete(
+            f"{client.rest_url}/{table_name}",
+            headers=headers,
+            params=params,
+            timeout=SUPABASE_TIMEOUT_SECONDS,
+        )
+        if not response.ok:
+            return SupabaseStatus(ok=False, message=f"删除 {table_name} 失败：{_parse_error(response)}")
+        return SupabaseStatus(ok=True, message="删除成功")
+    except requests.RequestException as exc:
+        return SupabaseStatus(ok=False, message=f"删除 {table_name} 失败：{exc}")
