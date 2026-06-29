@@ -8,10 +8,10 @@ from typing import Any
 
 import pandas as pd
 import requests
-import yfinance as yf
 
 from src.config import SECTOR_RADAR_CONFIG
 from src.data.finnhub_client import FINNHUB_BASE_URL, REQUEST_TIMEOUT_SECONDS
+from src.data.safe_yfinance import safe_download
 
 
 @dataclass(frozen=True)
@@ -59,7 +59,7 @@ def _fetch_quote(api_key: str | None, ticker: str) -> dict[str, float] | None:
             pass
 
     try:
-        hist = yf.download(ticker, period="5d", interval="1d", progress=False, auto_adjust=False)
+        hist = safe_download(ticker, period="5d", interval="1d")
         if len(hist) >= 2:
             return {"price": _to_float(hist["Close"].iloc[-1]), "previous_close": _to_float(hist["Close"].iloc[-2])}
     except Exception:
@@ -84,7 +84,7 @@ def _fetch_volume_stats(api_key: str | None, ticker: str) -> dict[str, float] | 
             pass
 
     try:
-        hist = yf.download(ticker, period="2mo", interval="1d", progress=False, auto_adjust=False)
+        hist = safe_download(ticker, period="2mo", interval="1d")
         if len(hist) >= 21:
             volumes = hist["Volume"].dropna()
             today_volume = _to_float(volumes.iloc[-1])
@@ -96,18 +96,53 @@ def _fetch_volume_stats(api_key: str | None, ticker: str) -> dict[str, float] | 
     return None
 
 
+def _fetch_yfinance_snapshot(ticker: str) -> dict[str, float] | None:
+    """用一次 yfinance 日线下载同时计算价格、涨跌幅、成交量和 RVOL。"""
+
+    try:
+        hist = safe_download(ticker, period="2mo", interval="1d")
+        if len(hist) < 21:
+            return None
+        close = pd.to_numeric(hist["Close"], errors="coerce").dropna()
+        volume_series = pd.to_numeric(hist["Volume"], errors="coerce").dropna()
+        if len(close) < 2 or len(volume_series) < 21:
+            return None
+        price = _to_float(close.iloc[-1])
+        previous_close = _to_float(close.iloc[-2])
+        volume = _to_float(volume_series.iloc[-1])
+        avg_volume20 = _to_float(volume_series.iloc[-21:-1].mean())
+        if price <= 0 or previous_close <= 0 or avg_volume20 <= 0:
+            return None
+        change_pct = (price - previous_close) / previous_close * 100
+        rvol = volume / avg_volume20
+        return {"price": price, "change_pct": change_pct, "volume": volume, "rvol": rvol, "dollar_volume": price * volume}
+    except Exception:
+        return None
+
+
 def _fetch_ticker_snapshot(api_key: str | None, ticker: str) -> dict[str, float] | None:
     """整合价格、涨跌幅、成交量、RVOL 和成交额。"""
 
-    quote = _fetch_quote(api_key, ticker)
-    volume_stats = _fetch_volume_stats(api_key, ticker)
-    if not quote or not volume_stats:
+    if api_key:
+        quote = _fetch_quote(api_key, ticker)
+        volume_stats = _fetch_volume_stats(api_key, ticker)
+        if quote and volume_stats:
+            previous_close = quote["previous_close"]
+            change_pct = (quote["price"] - previous_close) / previous_close * 100
+            volume = volume_stats["volume"]
+            rvol = volume / volume_stats["avg_volume20"]
+            return {"price": quote["price"], "change_pct": change_pct, "volume": volume, "rvol": rvol, "dollar_volume": quote["price"] * volume}
+
+    return _fetch_yfinance_snapshot(ticker)
+
+
+def fetch_ticker_snapshot(api_key: str | None, ticker: str) -> dict[str, float] | None:
+    """公开给影子组合引擎使用的单票快照；失败返回 None，不影响页面加载。"""
+
+    try:
+        return _fetch_ticker_snapshot(api_key, ticker)
+    except Exception:
         return None
-    previous_close = quote["previous_close"]
-    change_pct = (quote["price"] - previous_close) / previous_close * 100
-    volume = volume_stats["volume"]
-    rvol = volume / volume_stats["avg_volume20"]
-    return {"price": quote["price"], "change_pct": change_pct, "volume": volume, "rvol": rvol, "dollar_volume": quote["price"] * volume}
 
 
 def _format_volume(value: float) -> str:
