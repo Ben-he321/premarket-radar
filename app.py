@@ -16,13 +16,14 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data.finnhub_client import get_finnhub_api_key
+from src.risk.market_temperature import build_market_temperature
 from src.scoring.sector_radar import build_sector_radar
-from src.ui.theme import CYAN, GREEN, RED, inject_global_styles, metric_card, signed_color
+from src.ui.theme import CYAN, inject_global_styles, metric_card, signed_color
 
 
 st.set_page_config(
     page_title="盘前雷达 Pre-Market Radar",
-    page_icon="📡",
+    page_icon="📊",
     layout="centered",
 )
 inject_global_styles()
@@ -30,9 +31,16 @@ inject_global_styles()
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_home_radar(api_key: str | None) -> dict[str, object]:
-    """复用板块雷达数据，首页只取摘要，避免重复请求。"""
+    """复用板块雷达数据，避免首页重复请求。"""
 
     return build_sector_radar(api_key, top_sector_count=4)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_market_temperature() -> object:
+    """缓存市场情绪总闸，降低 yfinance 请求频率。"""
+
+    return build_market_temperature()
 
 
 def safe_dataframe(value: object) -> pd.DataFrame:
@@ -49,19 +57,12 @@ def fmt_pct(value: float | int | None) -> str:
     return f"{float(value):+.2f}%"
 
 
-def market_temperature(sectors_df: pd.DataFrame) -> tuple[str, str, str, str]:
-    """用强势板块表现粗略生成 risk-on/risk-off 温度。"""
+def fmt_bool(value: bool | None) -> str:
+    """格式化布尔状态。"""
 
-    if sectors_df.empty or "涨跌幅%" not in sectors_df.columns:
-        return "数据等待", "休市或数据源延迟时，今日市场温度会暂时显示为等待。", CYAN, "NEUTRAL"
-
-    top_change = float(sectors_df.iloc[0]["涨跌幅%"])
-    avg_top = float(pd.to_numeric(sectors_df.head(4)["涨跌幅%"], errors="coerce").mean())
-    if top_change > 0.8 and avg_top > 0:
-        return "Risk-On", "强势板块扩散良好，适合优先观察龙头与补涨票。", GREEN, "ON"
-    if top_change < -0.5 and avg_top < 0:
-        return "Risk-Off", "板块动能偏弱，盘前更适合降低追高欲望，等待确认。", RED, "OFF"
-    return "中性观察", "板块分歧仍在，先看成交量是否继续向强板块集中。", CYAN, "WATCH"
+    if value is None:
+        return "暂无"
+    return "是" if value else "否"
 
 
 def render_sector_table(sectors_df: pd.DataFrame) -> None:
@@ -91,7 +92,7 @@ def render_sector_table(sectors_df: pd.DataFrame) -> None:
                 <tr>
                     <th>板块</th>
                     <th>ETF</th>
-                    <th>涨跌幅</th>
+                    <th>涨跌幅%</th>
                     <th>RVOL</th>
                     <th>热度</th>
                 </tr>
@@ -108,33 +109,40 @@ def render_sector_table(sectors_df: pd.DataFrame) -> None:
 
 
 api_key = get_finnhub_api_key(st.secrets)
+
 with st.spinner("正在生成今日作战简报..."):
+    temperature = load_market_temperature()
     radar = load_home_radar(api_key)
 
 sectors_df = safe_dataframe(radar.get("sectors"))
 leaders_df = safe_dataframe(radar.get("leaders"))
 followers_df = safe_dataframe(radar.get("followers"))
 
-temperature, summary, signal_color, signal_code = market_temperature(sectors_df)
 top_sector = sectors_df.iloc[0] if not sectors_df.empty else None
 top_leader = leaders_df.iloc[0] if not leaders_df.empty else None
 top_follower = followers_df.iloc[0] if not followers_df.empty else None
 
 st.markdown("<div class='pmr-kicker'>PRE-MARKET RADAR</div>", unsafe_allow_html=True)
 st.markdown("<div class='pmr-title'>今日作战简报</div>", unsafe_allow_html=True)
-st.caption(f"更新时间：{datetime.now().strftime('%Y-%m-%d %H:%M')} · 数据延迟可接受，结果仅作盘前观察")
+st.caption(f"更新时间：{datetime.now().strftime('%Y-%m-%d %H:%M')} · 免费数据可能延迟，结果仅作盘前观察")
 
 st.markdown(
     f"""
     <div class="pmr-topline">
         <div>
             <div class="pmr-kicker">今日市场温度</div>
-            <div class="pmr-title">{temperature}</div>
-            <div class="pmr-muted">{summary}</div>
+            <div class="pmr-title">{temperature.label}</div>
+            <div class="pmr-muted">{temperature.summary}</div>
+            <div class="pmr-muted">
+                VIX：{fmt_pct(temperature.vix).replace('%', '')} ·
+                进攻5日：{fmt_pct(temperature.offensive_strength)} ·
+                防守5日：{fmt_pct(temperature.defensive_strength)} ·
+                SPY在20日均线上：{fmt_bool(temperature.spy_above_ma20)}
+            </div>
         </div>
         <div class="pmr-signal">
-            <span class="pmr-dot" style="background:{signal_color};"></span>
-            {signal_code}
+            <span class="pmr-dot" style="background:{temperature.color or CYAN};"></span>
+            {temperature.signal_code}
         </div>
     </div>
     """,
