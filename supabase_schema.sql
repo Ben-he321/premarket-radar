@@ -48,10 +48,39 @@ create table if not exists daily_report (
     updated_at timestamptz not null default now()
 );
 
+create table if not exists sector_snapshots (
+    id bigserial primary key,
+    snapshot_date date not null default current_date,
+    "板块" text not null,
+    "代表ETF" text not null,
+    "涨跌幅%" numeric(14, 6) not null default 0,
+    "RVOL" numeric(14, 6) not null default 0,
+    "热度分" numeric(14, 6) not null default 0,
+    "热度排名" integer not null,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    constraint sector_snapshots_snapshot_date_sector_key unique (snapshot_date, "板块")
+);
+
+create table if not exists sector_leader_snapshots (
+    id bigserial primary key,
+    snapshot_date date not null default current_date,
+    "板块" text not null,
+    "代码" text not null,
+    "涨跌幅%" numeric(14, 6) not null default 0,
+    "成交量" numeric(20, 2) not null default 0,
+    "RVOL" numeric(14, 6) not null default 0,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    constraint sector_leader_snapshots_date_sector_ticker_key unique (snapshot_date, "板块", "代码")
+);
+
 create index if not exists idx_shadow_account_date on shadow_account(account_date desc);
 create index if not exists idx_shadow_positions_ticker on shadow_positions(ticker);
 create index if not exists idx_shadow_trades_date on shadow_trades(trade_date desc);
 create index if not exists idx_daily_report_date on daily_report(report_date desc);
+create index if not exists idx_sector_snapshots_date_rank on sector_snapshots(snapshot_date desc, "热度排名" asc);
+create index if not exists idx_sector_leader_snapshots_date on sector_leader_snapshots(snapshot_date desc);
 
 -- 权限修复：允许 Streamlit 使用 anon key 通过 REST API 读写影子组合数据。
 -- 使用方法：如果表已经创建过，也可以单独复制本段到 Supabase SQL Editor 执行。
@@ -61,16 +90,22 @@ grant select, insert, update, delete on table shadow_account to anon, authentica
 grant select, insert, update, delete on table shadow_positions to anon, authenticated;
 grant select, insert, update, delete on table shadow_trades to anon, authenticated;
 grant select, insert, update, delete on table daily_report to anon, authenticated;
+grant select, insert, update, delete on table sector_snapshots to anon, authenticated;
+grant select, insert, update, delete on table sector_leader_snapshots to anon, authenticated;
 
 grant usage, select on sequence shadow_account_id_seq to anon, authenticated;
 grant usage, select on sequence shadow_positions_id_seq to anon, authenticated;
 grant usage, select on sequence shadow_trades_id_seq to anon, authenticated;
 grant usage, select on sequence daily_report_id_seq to anon, authenticated;
+grant usage, select on sequence sector_snapshots_id_seq to anon, authenticated;
+grant usage, select on sequence sector_leader_snapshots_id_seq to anon, authenticated;
 
 alter table shadow_account enable row level security;
 alter table shadow_positions enable row level security;
 alter table shadow_trades enable row level security;
 alter table daily_report enable row level security;
+alter table sector_snapshots enable row level security;
+alter table sector_leader_snapshots enable row level security;
 
 drop policy if exists shadow_account_anon_all on shadow_account;
 create policy shadow_account_anon_all on shadow_account
@@ -92,6 +127,18 @@ create policy shadow_trades_anon_all on shadow_trades
 
 drop policy if exists daily_report_anon_all on daily_report;
 create policy daily_report_anon_all on daily_report
+    for all to anon, authenticated
+    using (true)
+    with check (true);
+
+drop policy if exists sector_snapshots_anon_all on sector_snapshots;
+create policy sector_snapshots_anon_all on sector_snapshots
+    for all to anon, authenticated
+    using (true)
+    with check (true);
+
+drop policy if exists sector_leader_snapshots_anon_all on sector_leader_snapshots;
+create policy sector_leader_snapshots_anon_all on sector_leader_snapshots
     for all to anon, authenticated
     using (true)
     with check (true);

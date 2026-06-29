@@ -184,7 +184,17 @@ def build_sector_radar(api_key: str | None, top_sector_count: int = 5) -> dict[s
             snapshot = _fetch_ticker_snapshot(api_key, ticker)
             if not snapshot:
                 continue
-            stock_rows.append({"板块": sector_name, "代码": ticker, "涨跌幅%": float(snapshot["change_pct"]), "成交量": _format_volume(float(snapshot["volume"])), "RVOL": float(snapshot["rvol"]), "成交额": float(snapshot["dollar_volume"])})
+            stock_rows.append(
+                {
+                    "板块": sector_name,
+                    "代码": ticker,
+                    "涨跌幅%": float(snapshot["change_pct"]),
+                    "成交量": float(snapshot["volume"]),
+                    "成交量文本": _format_volume(float(snapshot["volume"])),
+                    "RVOL": float(snapshot["rvol"]),
+                    "成交额": float(snapshot["dollar_volume"]),
+                }
+            )
         if not stock_rows:
             continue
 

@@ -51,6 +51,14 @@ def render_table(df: pd.DataFrame, columns: list[str]) -> None:
                 value = f"{float(value):+.2f}%"
             elif column in {"RVOL", "热度分"}:
                 value = f"{float(value):.2f}"
+            elif column == "成交量":
+                numeric_value = float(value)
+                if numeric_value >= 1_000_000:
+                    value = f"{numeric_value / 1_000_000:.1f}M"
+                elif numeric_value >= 1_000:
+                    value = f"{numeric_value / 1_000:.1f}K"
+                else:
+                    value = f"{numeric_value:.0f}"
             cells.append(f"<td{style}>{value}</td>")
         rows.append("<tr>" + "".join(cells) + "</tr>")
 
