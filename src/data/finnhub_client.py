@@ -12,7 +12,7 @@ import requests
 
 
 FINNHUB_BASE_URL = "https://finnhub.io/api/v1"
-REQUEST_TIMEOUT_SECONDS = 10
+REQUEST_TIMEOUT_SECONDS = 8
 
 
 @dataclass(frozen=True)
