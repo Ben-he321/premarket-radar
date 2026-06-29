@@ -53,6 +53,7 @@ create table if not exists sector_snapshots (
     trade_date date not null default current_date,
     session text not null default 'prev_close',
     data_source text not null default '未知',
+    source text not null default 'live',
     "板块" text not null,
     "代表ETF" text not null,
     "涨跌幅%" numeric(14, 6) not null default 0,
@@ -69,6 +70,7 @@ create table if not exists sector_leader_snapshots (
     trade_date date not null default current_date,
     session text not null default 'prev_close',
     data_source text not null default '未知',
+    source text not null default 'live',
     "板块" text not null,
     "代码" text not null,
     "涨跌幅%" numeric(14, 6) not null default 0,
@@ -84,6 +86,7 @@ alter table sector_snapshots add column if not exists snapshot_date date;
 alter table sector_snapshots add column if not exists trade_date date;
 alter table sector_snapshots add column if not exists session text not null default 'prev_close';
 alter table sector_snapshots add column if not exists data_source text not null default '未知';
+alter table sector_snapshots add column if not exists source text not null default 'live';
 update sector_snapshots set trade_date = coalesce(trade_date, snapshot_date, current_date) where trade_date is null;
 alter table sector_snapshots alter column trade_date set default current_date;
 alter table sector_snapshots alter column trade_date set not null;
@@ -92,6 +95,7 @@ alter table sector_leader_snapshots add column if not exists snapshot_date date;
 alter table sector_leader_snapshots add column if not exists trade_date date;
 alter table sector_leader_snapshots add column if not exists session text not null default 'prev_close';
 alter table sector_leader_snapshots add column if not exists data_source text not null default '未知';
+alter table sector_leader_snapshots add column if not exists source text not null default 'live';
 update sector_leader_snapshots set trade_date = coalesce(trade_date, snapshot_date, current_date) where trade_date is null;
 alter table sector_leader_snapshots alter column trade_date set default current_date;
 alter table sector_leader_snapshots alter column trade_date set not null;
