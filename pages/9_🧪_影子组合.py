@@ -15,6 +15,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.data.finnhub_client import get_finnhub_api_key
+from src.risk.shadow_engine import run_shadow_engine
 from src.supabase_client import fetch_rows, get_supabase_client, insert_row
 from src.ui.theme import inject_global_styles, metric_card, render_safe_line_chart, signed_color
 
@@ -90,6 +92,22 @@ else:
 account_rows, account_status = fetch_rows(client, "shadow_account", order_by="account_date", desc=True, limit=120)
 positions, positions_status = fetch_rows(client, "shadow_positions", order_by="entry_date", desc=True)
 trades, trades_status = fetch_rows(client, "shadow_trades", order_by="trade_date", desc=True, limit=100)
+
+api_key = get_finnhub_api_key(st.secrets)
+with st.spinner("自动引擎正在检查影子组合..."):
+    engine_result = run_shadow_engine(client, api_key, account_rows, positions, trades)
+
+if engine_result.messages:
+    for message in engine_result.messages:
+        st.info(message)
+if engine_result.errors:
+    for message in engine_result.errors:
+        st.warning(message)
+
+if engine_result.buys or engine_result.sells:
+    account_rows, account_status = fetch_rows(client, "shadow_account", order_by="account_date", desc=True, limit=120)
+    positions, positions_status = fetch_rows(client, "shadow_positions", order_by="entry_date", desc=True)
+    trades, trades_status = fetch_rows(client, "shadow_trades", order_by="trade_date", desc=True, limit=100)
 
 latest_account = account_rows[0] if account_rows else {}
 cash = to_float(latest_account.get("cash"), INITIAL_CAPITAL)
