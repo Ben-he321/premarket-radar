@@ -112,7 +112,7 @@ def _append_skip_log(result: ShadowEngineResult, ticker: str, reason: str) -> No
     """记录跳过下单原因；这些日志会写入 daily_report 方便复盘。"""
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    log = f"{timestamp} {ticker} skip: {reason}"
+    log = f"{timestamp} skip {ticker}: {reason}"
     result.skip_logs.append(log)
     result.messages.append(log)
 
