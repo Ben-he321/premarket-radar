@@ -22,6 +22,13 @@ AUTO_ENGINE_MARKER = "[AUTO_ENGINE_DONE]"
 BUY_SIDES = {"买", "做多"}
 SELL_SIDES = {"卖", "做空"}
 
+__all__ = [
+    "ShadowEngineResult",
+    "derive_cash_from_trades",
+    "derive_market_value_from_positions",
+    "run_shadow_engine",
+]
+
 
 @dataclass
 class ShadowEngineResult:
