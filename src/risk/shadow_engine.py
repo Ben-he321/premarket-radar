@@ -19,6 +19,8 @@ STOP_LOSS_RATE = 0.05
 MAX_HOLD_DAYS = 3
 MAX_AUTO_BUYS_PER_RUN = 2
 AUTO_ENGINE_MARKER = "[AUTO_ENGINE_DONE]"
+BUY_SIDES = {"买", "做多"}
+SELL_SIDES = {"卖", "做空"}
 
 
 @dataclass
@@ -33,6 +35,7 @@ class ShadowEngineResult:
     market_label: str = "未知"
     market_signal: str = "UNKNOWN"
     decision_summary: str = "市场状态尚未计算。"
+    skip_logs: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -69,12 +72,42 @@ def _to_date(value: object) -> date | None:
         return None
 
 
-def _latest_cash(account_rows: list[dict[str, object]]) -> float:
-    """读取最新账户现金；没有快照时使用初始资金。"""
+def derive_cash_from_trades(trades: list[dict[str, object]], initial_cash: float = INITIAL_CAPITAL) -> float:
+    """从成交流水推导现金，避免 shadow_account 快照和真实成交脱节。
 
-    if not account_rows:
-        return INITIAL_CAPITAL
-    return _to_float(account_rows[0].get("cash"), INITIAL_CAPITAL)
+    现金只允许通过成交变化：
+    cash = 初始资金 - Σ(买入成交额) + Σ(卖出成交额)
+    这样只要买卖成交写进 shadow_trades，现金就会自动匹配，不再依赖任何单独写入的快照字段。
+    """
+
+    cash = float(initial_cash)
+    for trade in trades:
+        side = str(trade.get("side") or "").strip()
+        price = _to_float(trade.get("price"))
+        quantity = _to_float(trade.get("quantity"))
+        notional = price * quantity
+        if price <= 0 or quantity <= 0:
+            continue
+        if side in BUY_SIDES:
+            cash -= notional
+        elif side in SELL_SIDES:
+            cash += notional
+    return cash
+
+
+def derive_market_value_from_positions(positions: list[dict[str, object]]) -> float:
+    """按当前 MVP 口径从持仓推导持仓市值：entry_price × quantity。"""
+
+    return sum(_to_float(item.get("entry_price")) * _to_float(item.get("quantity")) for item in positions)
+
+
+def _append_skip_log(result: ShadowEngineResult, ticker: str, reason: str) -> None:
+    """记录跳过下单原因；这些日志会写入 daily_report 方便复盘。"""
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log = f"{timestamp} {ticker} skip: {reason}"
+    result.skip_logs.append(log)
+    result.messages.append(log)
 
 
 def _already_bought_today(trades: list[dict[str, object]], ticker: str, today: str) -> bool:
@@ -178,16 +211,16 @@ def _candidate_tickers(
     return unique
 
 
-def _insert_account_snapshot(client: SupabaseRestClient, cash: float, market_value: float, note: str) -> SupabaseStatus:
-    """写入账户快照，用于收益曲线。"""
+def _insert_account_snapshot(client: SupabaseRestClient, trades: list[dict[str, object]], positions: list[dict[str, object]], note: str) -> SupabaseStatus:
+    """写入账户快照；现金和市值都从 trades/positions 推导，不手工指定。"""
 
     return insert_row(
         client,
         "shadow_account",
         {
             "account_date": date.today().isoformat(),
-            "cash": round(cash, 2),
-            "market_value": round(market_value, 2),
+            "cash": round(derive_cash_from_trades(trades), 2),
+            "market_value": round(derive_market_value_from_positions(positions), 2),
             "note": note,
         },
     )
@@ -221,9 +254,10 @@ def _mark_auto_engine_done(
 
     report = _today_report(daily_reports, today_text)
     existing_actions = str(report.get("actions") or "").strip()
+    skip_text = "；跳过：" + " | ".join(result.skip_logs) if result.skip_logs else ""
     run_summary = (
         f"{AUTO_ENGINE_MARKER} 自动引擎已执行：市场={decision.market_label}({decision.market_signal})；"
-        f"决策={decision.summary}；买入 {result.buys} 笔，卖出 {result.sells} 笔。"
+        f"决策={decision.summary}；买入 {result.buys} 笔，卖出 {result.sells} 笔{skip_text}。"
     )
     actions = f"{existing_actions}\n{run_summary}".strip() if existing_actions else run_summary
 
@@ -283,10 +317,10 @@ def run_shadow_engine(
         result.messages.append("今日自动引擎已执行过，本次刷新不再重复下单。")
         return result
 
-    cash = _latest_cash(account_rows)
+    running_trades = list(trades)
+    running_positions = list(positions)
+    cash = derive_cash_from_trades(running_trades)
     held_tickers = {str(item.get("ticker", "")).upper() for item in positions}
-    sold_position_ids: set[str] = set()
-    bought_market_value = 0.0
 
     # 先处理卖出：-5% 止损或持有 3 天到期。
     for position in positions:
@@ -311,19 +345,20 @@ def run_shadow_engine(
 
         reason = "自动引擎：触发 -5% 止损" if current_price <= stop_loss else "自动引擎：持有 3 天到期"
         pnl = (current_price - entry_price) * quantity
+        trade_payload = {
+            "ticker": ticker,
+            "side": "卖",
+            "price": round(current_price, 4),
+            "quantity": quantity,
+            "trade_date": today_text,
+            "pnl": round(pnl, 2),
+            "reason": reason,
+            "strategy_tag": str(position.get("strategy_tag") or "自动引擎"),
+        }
         trade_status = insert_row(
             client,
             "shadow_trades",
-            {
-                "ticker": ticker,
-                "side": "卖",
-                "price": round(current_price, 4),
-                "quantity": quantity,
-                "trade_date": today_text,
-                "pnl": round(pnl, 2),
-                "reason": reason,
-                "strategy_tag": str(position.get("strategy_tag") or "自动引擎"),
-            },
+            trade_payload,
         )
         if not trade_status.ok:
             result.errors.append(trade_status.message)
@@ -334,8 +369,9 @@ def run_shadow_engine(
             result.errors.append(delete_status.message)
             continue
 
-        cash += current_price * quantity
-        sold_position_ids.add(str(position_id))
+        running_trades.append(trade_payload)
+        running_positions = [item for item in running_positions if str(item.get("id")) != str(position_id)]
+        cash = derive_cash_from_trades(running_trades)
         held_tickers.discard(ticker)
         result.sells += 1
         result.messages.append(f"{ticker} 已虚拟卖出：{reason}，盈亏 €{pnl:,.2f}")
@@ -372,58 +408,61 @@ def run_shadow_engine(
         stop_loss = current_price * (1 - STOP_LOSS_RATE)
         risk_per_share = max(current_price - stop_loss, 0.01)
         quantity = int(risk_budget / risk_per_share)
-        quantity = min(quantity, int(cash / current_price))
         if quantity <= 0:
-            result.messages.append("现金不足，自动买入暂停。")
-            break
+            _append_skip_log(result, ticker, "风险预算不足以买入 1 股")
+            continue
 
+        planned_cost = current_price * quantity
+        if planned_cost > cash:
+            _append_skip_log(result, ticker, f"现金不足 需要{planned_cost:.2f} 可用{cash:.2f}")
+            continue
+
+        position_payload = {
+            "ticker": ticker,
+            "entry_price": round(current_price, 4),
+            "quantity": quantity,
+            "entry_date": today_text,
+            "stop_loss": round(stop_loss, 4),
+            "strategy_tag": strategy_tag,
+            "note": "自动引擎虚拟买入",
+        }
         position_status = insert_row(
             client,
             "shadow_positions",
-            {
-                "ticker": ticker,
-                "entry_price": round(current_price, 4),
-                "quantity": quantity,
-                "entry_date": today_text,
-                "stop_loss": round(stop_loss, 4),
-                "strategy_tag": strategy_tag,
-                "note": "自动引擎虚拟买入",
-            },
+            position_payload,
         )
         if not position_status.ok:
             result.errors.append(position_status.message)
             continue
 
+        trade_payload = {
+            "ticker": ticker,
+            "side": "买",
+            "price": round(current_price, 4),
+            "quantity": quantity,
+            "trade_date": today_text,
+            "pnl": 0,
+            "reason": f"自动引擎：{decision.market_label}市场决策，来自板块雷达强势候选",
+            "strategy_tag": strategy_tag,
+        }
         trade_status = insert_row(
             client,
             "shadow_trades",
-            {
-                "ticker": ticker,
-                "side": "买",
-                "price": round(current_price, 4),
-                "quantity": quantity,
-                "trade_date": today_text,
-                "pnl": 0,
-                "reason": f"自动引擎：{decision.market_label}市场决策，来自板块雷达强势候选",
-                "strategy_tag": strategy_tag,
-            },
+            trade_payload,
         )
         if not trade_status.ok:
             result.errors.append(trade_status.message)
             continue
 
-        cash -= current_price * quantity
-        bought_market_value += current_price * quantity
+        running_trades.append(trade_payload)
+        running_positions.append(position_payload)
+        cash = derive_cash_from_trades(running_trades)
         held_tickers.add(ticker)
         result.buys += 1
         result.messages.append(f"{ticker} 已虚拟买入：{quantity} 股，价格 ${current_price:,.2f}，止损 ${stop_loss:,.2f}")
 
-    active_positions = [item for item in positions if str(item.get("id")) not in sold_position_ids]
-    market_value = sum(_to_float(item.get("entry_price")) * _to_float(item.get("quantity")) for item in active_positions)
-    market_value += bought_market_value
-
     if result.buys or result.sells:
-        account_status = _insert_account_snapshot(client, cash, market_value, "自动引擎运行后账户快照")
+        account_status = _insert_account_snapshot(client, running_trades, running_positions, "自动引擎运行后派生账户快照")
         if not account_status.ok:
             result.errors.append(account_status.message)
 

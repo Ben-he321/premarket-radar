@@ -16,7 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data.finnhub_client import get_finnhub_api_key
-from src.risk.shadow_engine import ShadowEngineResult, run_shadow_engine
+from src.risk.shadow_engine import ShadowEngineResult, derive_cash_from_trades, derive_market_value_from_positions, run_shadow_engine
 from src.supabase_client import fetch_rows, get_supabase_client, insert_row
 from src.ui.theme import inject_global_styles, metric_card, render_safe_line_chart, signed_color
 
@@ -91,7 +91,7 @@ else:
 
 account_rows, account_status = fetch_rows(client, "shadow_account", order_by="account_date", desc=True, limit=120)
 positions, positions_status = fetch_rows(client, "shadow_positions", order_by="entry_date", desc=True)
-trades, trades_status = fetch_rows(client, "shadow_trades", order_by="trade_date", desc=True, limit=100)
+trades, trades_status = fetch_rows(client, "shadow_trades", order_by="trade_date", desc=True)
 daily_reports, daily_report_status = fetch_rows(client, "daily_report", order_by="report_date", desc=True, limit=7)
 
 api_key = get_finnhub_api_key(st.secrets)
@@ -124,21 +124,20 @@ if engine_result.errors:
 if engine_result.buys or engine_result.sells:
     account_rows, account_status = fetch_rows(client, "shadow_account", order_by="account_date", desc=True, limit=120)
     positions, positions_status = fetch_rows(client, "shadow_positions", order_by="entry_date", desc=True)
-    trades, trades_status = fetch_rows(client, "shadow_trades", order_by="trade_date", desc=True, limit=100)
+    trades, trades_status = fetch_rows(client, "shadow_trades", order_by="trade_date", desc=True)
 
 if not daily_report_status.ok and client is not None:
     st.warning(daily_report_status.message)
 
-latest_account = account_rows[0] if account_rows else {}
-cash = to_float(latest_account.get("cash"), INITIAL_CAPITAL)
-position_value = sum(to_float(item.get("entry_price")) * to_float(item.get("quantity")) for item in positions)
+cash = derive_cash_from_trades(trades, INITIAL_CAPITAL)
+position_value = derive_market_value_from_positions(positions)
 total_equity = cash + position_value
 total_pnl = total_equity - INITIAL_CAPITAL
 
 st.markdown(
     "<div class='pmr-grid'>"
     + metric_card("初始资金", format_eur(INITIAL_CAPITAL), "影子组合默认本金", "EUR")
-    + metric_card("当前现金", format_eur(cash), "来自 shadow_account 最新快照", "Supabase")
+    + metric_card("当前现金", format_eur(cash), "由 shadow_trades 自动推导", "现金账本")
     + metric_card("持仓市值", format_eur(position_value), "当前按买入价简化估算", "MVP 估值")
     + "</div>",
     unsafe_allow_html=True,
@@ -162,20 +161,20 @@ st.subheader("收益曲线")
 render_safe_line_chart(build_equity_curve(account_rows), "暂无账户快照，初始化影子账户后会显示收益曲线。")
 
 with st.expander("初始化 / 写入测试"):
-    st.write("这一步只搭读写框架，不执行真实自动交易。")
-    if st.button("初始化影子账户 €4500", disabled=client is None):
+    st.write("账户现金以 shadow_trades 推导为准；这里仅写入一条派生快照用于收益曲线。")
+    if st.button("写入当前派生账户快照", disabled=client is None):
         insert_status = insert_row(
             client,
             "shadow_account",
             {
                 "account_date": date.today().isoformat(),
-                "cash": INITIAL_CAPITAL,
-                "market_value": 0,
-                "note": "初始化影子账户",
+                "cash": round(cash, 2),
+                "market_value": round(position_value, 2),
+                "note": "手动写入派生账户快照",
             },
         )
         if insert_status.ok:
-            st.success("影子账户已初始化。")
+            st.success("派生账户快照已写入。")
             st.rerun()
         else:
             st.error(insert_status.message)
