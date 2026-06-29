@@ -8,6 +8,7 @@ from typing import Any
 
 import pandas as pd
 
+from src.data.sector_snapshots import save_sector_snapshot
 from src.risk.market_temperature import MarketTemperature, build_market_temperature
 from src.scoring.sector_radar import build_sector_radar, fetch_ticker_snapshot
 from src.supabase_client import SupabaseRestClient, SupabaseStatus, delete_rows, insert_row, upsert_row
@@ -328,6 +329,7 @@ def run_shadow_engine(
     running_positions = list(positions)
     cash = derive_cash_from_trades(running_trades)
     held_tickers = {str(item.get("ticker", "")).upper() for item in positions}
+    radar: dict[str, object] | None = None
 
     # 先处理卖出：-5% 止损或持有 3 天到期。
     for position in positions:
@@ -383,20 +385,28 @@ def run_shadow_engine(
         result.sells += 1
         result.messages.append(f"{ticker} 已虚拟卖出：{reason}，盈亏 €{pnl:,.2f}")
 
-    # 再处理买入：先服从市场总闸，再决定是否读取板块雷达找候选。
-    if not decision.allow_new_positions:
-        candidates = []
-    else:
-        try:
-            radar = build_sector_radar(api_key, top_sector_count=3)
-            candidates = _candidate_tickers(
-                radar,
-                leaders_only=decision.leaders_only,
-                strongest_sector_only=decision.strongest_sector_only,
+    # 每天首次运行时先保存板块快照，和当天是否开仓无关。
+    try:
+        radar = build_sector_radar(api_key, top_sector_count=3)
+        snapshot_status = save_sector_snapshot(radar, today, client=client)
+        if snapshot_status.ok:
+            result.messages.append(
+                f"板块快照已保存：板块 {snapshot_status.sector_rows} 行，龙头 {snapshot_status.leader_rows} 行。"
             )
-        except Exception as exc:
-            candidates = []
-            result.messages.append(f"读取板块雷达失败，本次不新开仓：{exc}")
+        else:
+            result.messages.extend(snapshot_status.errors)
+    except Exception as exc:
+        result.messages.append(f"读取或保存板块快照失败，本次不影响持仓管理：{exc}")
+
+    # 再处理买入：先服从市场总闸，再决定是否使用板块雷达候选。
+    if decision.allow_new_positions and radar is not None:
+        candidates = _candidate_tickers(
+            radar,
+            leaders_only=decision.leaders_only,
+            strongest_sector_only=decision.strongest_sector_only,
+        )
+    else:
+        candidates = []
 
     # M2 先用固定初始资金做风险锚点：€4500 × 1% ≈ €45；中性市场再减半。
     risk_budget = INITIAL_CAPITAL * RISK_PER_TRADE * decision.risk_multiplier
