@@ -81,7 +81,7 @@ client, status = get_supabase_client(st.secrets)
 
 st.markdown("<div class='pmr-kicker'>SHADOW PORTFOLIO</div>", unsafe_allow_html=True)
 st.title("影子组合")
-st.caption("全自动虚拟盘框架：先搭账户、持仓、成交和收益曲线，后续接入自动交易引擎。")
+st.caption("全自动虚拟盘框架：当前自动引擎使用上一交易日收盘强弱快照，不是实时行情数据。")
 
 if status.ok:
     st.success(f"✅ {status.message}")
@@ -102,6 +102,7 @@ else:
         engine_result = run_shadow_engine(client, api_key, account_rows, positions, trades, daily_reports)
 
 st.subheader("市场总闸与引擎决策")
+st.info("数据口径提示：板块雷达候选来自隔夜收盘快照；操作记录中会显示数据来源、对应交易日和 session。")
 st.markdown(
     "<div class='pmr-grid'>"
     + metric_card("当前市场状态", engine_result.market_label, "来自首页 market_temperature 总闸", engine_result.market_signal)
@@ -236,4 +237,4 @@ render_rows_table(
 )
 
 st.subheader("自动交易引擎")
-st.info("当前自动引擎会先读取市场情绪总闸，再按 进攻 / 中性 / 防守 三档纪律决定是否从板块雷达虚拟开仓。")
+st.info("当前自动引擎会先读取市场情绪总闸，再按 进攻 / 中性 / 防守 三档纪律决定是否从上一交易日强弱快照里虚拟开仓。")

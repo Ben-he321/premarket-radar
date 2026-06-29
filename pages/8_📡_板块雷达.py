@@ -21,7 +21,7 @@ st.set_page_config(page_title="板块雷达", page_icon="📡", layout="centered
 inject_global_styles()
 
 st.title("板块雷达")
-st.caption("M2：先找强势板块，再找板块龙头，最后找板块内跟风候选。")
+st.caption("M2：基于上一交易日收盘强弱，先找强势板块，再找板块龙头，最后找板块内跟风候选。")
 st.info("富途的热度榜这里暂时没有，用「涨幅 + 相对成交量 RVOL」作为热度近似替代。")
 
 
@@ -112,11 +112,19 @@ if status.ok:
 else:
     st.error(f"❌ {status.message}")
 
+metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+st.info(
+    "数据口径：上一交易日收盘强弱快照；"
+    f"数据来源：{metadata.get('data_source', '未知')}；"
+    f"对应交易日：{metadata.get('trade_date', '未知')}；"
+    f"session：{metadata.get('session', 'prev_close')}。"
+)
+
 sectors_df = result["sectors"]
 leaders_df = result["leaders"]
 followers_df = result["followers"]
 
-st.subheader("① 今日强势板块榜")
+st.subheader("① 上一交易日强势板块榜")
 render_table(sectors_df.head(8), ["板块", "代表ETF", "涨跌幅%", "RVOL", "热度分"])
 
 st.subheader("② 各强板块龙头")

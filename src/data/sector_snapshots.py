@@ -40,8 +40,8 @@ def _to_text(value: object) -> str:
     return str(value).strip()
 
 
-def _normalize_snapshot_date(snapshot_date: date | str | None) -> str:
-    """保存为 YYYY-MM-DD，方便作为 upsert 唯一键的一部分。"""
+def _normalize_fallback_date(snapshot_date: date | str | None) -> str:
+    """缺少来源交易日时才使用运行日兜底。"""
 
     if snapshot_date is None:
         return date.today().isoformat()
@@ -56,8 +56,14 @@ def _safe_frame(value: object) -> pd.DataFrame:
     return value if isinstance(value, pd.DataFrame) else pd.DataFrame()
 
 
-def _sector_payloads(sectors_df: pd.DataFrame, snapshot_date: str) -> list[dict[str, Any]]:
-    """把板块强度表转成 Supabase 行，保留原始指标数值。"""
+def _row_trade_date(item: pd.Series, fallback_date: str) -> str:
+    """优先使用数据源返回的交易日，避免把运行日误当成行情日期。"""
+
+    return _to_text(item.get("trade_date")) or fallback_date
+
+
+def _sector_payloads(sectors_df: pd.DataFrame, fallback_date: str) -> list[dict[str, Any]]:
+    """把板块强度表转成 Supabase 行，保留原始指标数值和来源标签。"""
 
     if sectors_df.empty:
         return []
@@ -70,7 +76,9 @@ def _sector_payloads(sectors_df: pd.DataFrame, snapshot_date: str) -> list[dict[
             continue
         rows.append(
             {
-                "snapshot_date": snapshot_date,
+                "trade_date": _row_trade_date(item, fallback_date),
+                "session": _to_text(item.get("session")) or "prev_close",
+                "data_source": _to_text(item.get("data_source")) or "未知",
                 "板块": sector_name,
                 "代表ETF": _to_text(item.get("代表ETF")),
                 "涨跌幅%": _to_float(item.get("涨跌幅%")),
@@ -82,8 +90,8 @@ def _sector_payloads(sectors_df: pd.DataFrame, snapshot_date: str) -> list[dict[
     return rows
 
 
-def _leader_payloads(leaders_df: pd.DataFrame, snapshot_date: str) -> list[dict[str, Any]]:
-    """把板块龙头表转成 Supabase 行，保留原始指标数值。"""
+def _leader_payloads(leaders_df: pd.DataFrame, fallback_date: str) -> list[dict[str, Any]]:
+    """把板块龙头表转成 Supabase 行，保留原始指标数值和来源标签。"""
 
     if leaders_df.empty:
         return []
@@ -96,7 +104,9 @@ def _leader_payloads(leaders_df: pd.DataFrame, snapshot_date: str) -> list[dict[
             continue
         rows.append(
             {
-                "snapshot_date": snapshot_date,
+                "trade_date": _row_trade_date(item, fallback_date),
+                "session": _to_text(item.get("session")) or "prev_close",
+                "data_source": _to_text(item.get("data_source")) or "未知",
                 "板块": sector_name,
                 "代码": ticker,
                 "涨跌幅%": _to_float(item.get("涨跌幅%")),
@@ -116,7 +126,8 @@ def save_sector_snapshot(
     """保存板块强度和龙头快照。
 
     设计要点：
-    - 使用 Supabase upsert，唯一键由 schema 保证，同一天重复保存会覆盖。
+    - 使用 Supabase upsert，唯一键由 schema 保证，同一交易日重复保存会覆盖。
+    - trade_date 来自数据源对应交易日；session 统一标为 prev_close，诚实标注隔夜收盘口径。
     - 保存原始数值指标，未来即使热度公式变化，也能用历史涨跌幅/RVOL 重算。
     - client 为空时友好失败，不抛异常，避免影子组合页崩溃。
     """
@@ -124,20 +135,20 @@ def save_sector_snapshot(
     if client is None:
         return SectorSnapshotSaveResult(ok=False, errors=["Supabase 未连接，板块快照未保存。"])
 
-    snapshot_date_text = _normalize_snapshot_date(snapshot_date)
-    sector_rows = _sector_payloads(_safe_frame(radar_result.get("sectors")), snapshot_date_text)
-    leader_rows = _leader_payloads(_safe_frame(radar_result.get("leaders")), snapshot_date_text)
+    fallback_date = _normalize_fallback_date(snapshot_date)
+    sector_rows = _sector_payloads(_safe_frame(radar_result.get("sectors")), fallback_date)
+    leader_rows = _leader_payloads(_safe_frame(radar_result.get("leaders")), fallback_date)
     result = SectorSnapshotSaveResult(ok=True)
 
     for payload in sector_rows:
-        status = upsert_row(client, "sector_snapshots", payload, on_conflict="snapshot_date,板块")
+        status = upsert_row(client, "sector_snapshots", payload, on_conflict="trade_date,板块")
         if status.ok:
             result.sector_rows += 1
         else:
             result.errors.append(status.message)
 
     for payload in leader_rows:
-        status = upsert_row(client, "sector_leader_snapshots", payload, on_conflict="snapshot_date,板块,代码")
+        status = upsert_row(client, "sector_leader_snapshots", payload, on_conflict="trade_date,板块,代码")
         if status.ok:
             result.leader_rows += 1
         else:

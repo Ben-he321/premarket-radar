@@ -389,9 +389,15 @@ def run_shadow_engine(
     try:
         radar = build_sector_radar(api_key, top_sector_count=3)
         snapshot_status = save_sector_snapshot(radar, today, client=client)
+        metadata = radar.get("metadata") if isinstance(radar.get("metadata"), dict) else {}
+        source_text = (
+            f"数据来源 {metadata.get('data_source', '未知')}，"
+            f"对应交易日 {metadata.get('trade_date', '未知')}，"
+            f"session {metadata.get('session', 'prev_close')}"
+        )
         if snapshot_status.ok:
             result.messages.append(
-                f"板块快照已保存：板块 {snapshot_status.sector_rows} 行，龙头 {snapshot_status.leader_rows} 行。"
+                f"隔夜收盘板块快照已保存：板块 {snapshot_status.sector_rows} 行，龙头 {snapshot_status.leader_rows} 行；{source_text}。"
             )
         else:
             result.messages.extend(snapshot_status.errors)
