@@ -33,10 +33,37 @@ class MarketTemperature:
 def _close_series(ticker: str, period: str = "2mo") -> pd.Series:
     """读取单个 ticker 的收盘价，失败返回空序列。"""
 
-    frame = safe_download(ticker, period=period, interval="1d")
-    if frame.empty or "Close" not in frame.columns:
+    try:
+        frame = safe_download(ticker, period=period, interval="1d")
+        if frame.empty:
+            return pd.Series(dtype=float)
+
+        if isinstance(frame.columns, pd.MultiIndex):
+            close_data = pd.DataFrame()
+            for level in range(frame.columns.nlevels):
+                try:
+                    close_data = frame.xs("Close", axis=1, level=level, drop_level=False)
+                    if not close_data.empty:
+                        break
+                except (KeyError, ValueError):
+                    continue
+            if close_data.empty:
+                return pd.Series(dtype=float)
+            close_series = close_data.iloc[:, 0]
+        elif "Close" in frame.columns:
+            close_series = frame["Close"]
+        else:
+            return pd.Series(dtype=float)
+
+        # yfinance 偶尔会返回单列 DataFrame，这里统一压成一维 Series。
+        if isinstance(close_series, pd.DataFrame):
+            if close_series.empty:
+                return pd.Series(dtype=float)
+            close_series = close_series.iloc[:, 0]
+
+        return pd.to_numeric(close_series.squeeze(), errors="coerce").dropna().astype(float)
+    except Exception:
         return pd.Series(dtype=float)
-    return pd.to_numeric(frame["Close"], errors="coerce").dropna().astype(float)
 
 
 def _five_day_return(ticker: str) -> float | None:

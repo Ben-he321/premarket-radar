@@ -9,7 +9,7 @@ from typing import Any
 import pandas as pd
 
 from src.scoring.sector_radar import build_sector_radar, fetch_ticker_snapshot
-from src.supabase_client import SupabaseRestClient, SupabaseStatus, delete_rows, insert_row
+from src.supabase_client import SupabaseRestClient, SupabaseStatus, delete_rows, insert_row, upsert_row
 
 
 INITIAL_CAPITAL = 4500.0
@@ -17,6 +17,7 @@ RISK_PER_TRADE = 0.01
 STOP_LOSS_RATE = 0.05
 MAX_HOLD_DAYS = 3
 MAX_AUTO_BUYS_PER_RUN = 2
+AUTO_ENGINE_MARKER = "[AUTO_ENGINE_DONE]"
 
 
 @dataclass
@@ -110,12 +111,58 @@ def _insert_account_snapshot(client: SupabaseRestClient, cash: float, market_val
     )
 
 
+def _today_report(daily_reports: list[dict[str, object]], today_text: str) -> dict[str, object]:
+    """从 daily_report 里找到今天的报告；没有则返回空字典。"""
+
+    for report in daily_reports:
+        if str(report.get("report_date")) == today_text:
+            return report
+    return {}
+
+
+def _auto_engine_already_ran(daily_reports: list[dict[str, object]], today_text: str) -> bool:
+    """检查今天是否已经自动运行过，避免刷新页面重复下单。"""
+
+    report = _today_report(daily_reports, today_text)
+    actions = str(report.get("actions") or "")
+    return AUTO_ENGINE_MARKER in actions
+
+
+def _mark_auto_engine_done(
+    client: SupabaseRestClient,
+    daily_reports: list[dict[str, object]],
+    today_text: str,
+    result: ShadowEngineResult,
+) -> SupabaseStatus:
+    """把今日自动引擎已执行写进 daily_report，保留已有复盘文本。"""
+
+    report = _today_report(daily_reports, today_text)
+    existing_actions = str(report.get("actions") or "").strip()
+    run_summary = f"{AUTO_ENGINE_MARKER} 自动引擎已执行：买入 {result.buys} 笔，卖出 {result.sells} 笔。"
+    actions = f"{existing_actions}\n{run_summary}".strip() if existing_actions else run_summary
+
+    return upsert_row(
+        client,
+        "daily_report",
+        {
+            "report_date": today_text,
+            "daily_pnl": _to_float(report.get("daily_pnl"), 0.0),
+            "actions": actions,
+            "loss_analysis": str(report.get("loss_analysis") or ""),
+            "missed_opportunities": str(report.get("missed_opportunities") or ""),
+            "summary": str(report.get("summary") or "自动引擎已完成今日检查。"),
+        },
+        on_conflict="report_date",
+    )
+
+
 def run_shadow_engine(
     client: SupabaseRestClient | None,
     api_key: str | None,
     account_rows: list[dict[str, object]],
     positions: list[dict[str, object]],
     trades: list[dict[str, object]],
+    daily_reports: list[dict[str, object]] | None = None,
 ) -> ShadowEngineResult:
     """运行简化版影子组合自动买卖；任何失败都返回中文消息，不抛异常。"""
 
@@ -125,6 +172,10 @@ def run_shadow_engine(
 
     today = date.today()
     today_text = today.isoformat()
+    daily_reports = daily_reports or []
+    if _auto_engine_already_ran(daily_reports, today_text):
+        return ShadowEngineResult(ok=True, messages=["今日自动引擎已执行过，本次刷新不再重复下单。"])
+
     cash = _latest_cash(account_rows)
     held_tickers = {str(item.get("ticker", "")).upper() for item in positions}
     sold_position_ids: set[str] = set()
@@ -264,6 +315,11 @@ def run_shadow_engine(
 
     if not result.messages and not result.errors:
         result.messages.append("自动引擎已检查：暂无需要买入或卖出的信号。")
+
+    if not result.errors:
+        mark_status = _mark_auto_engine_done(client, daily_reports, today_text, result)
+        if not mark_status.ok:
+            result.errors.append(mark_status.message)
 
     result.ok = not result.errors
     return result
