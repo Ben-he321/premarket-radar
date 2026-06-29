@@ -79,6 +79,7 @@ def _sector_payloads(sectors_df: pd.DataFrame, fallback_date: str) -> list[dict[
                 "trade_date": _row_trade_date(item, fallback_date),
                 "session": _to_text(item.get("session")) or "prev_close",
                 "data_source": _to_text(item.get("data_source")) or "未知",
+                "source": _to_text(item.get("source")) or "live",
                 "板块": sector_name,
                 "代表ETF": _to_text(item.get("代表ETF")),
                 "涨跌幅%": _to_float(item.get("涨跌幅%")),
@@ -107,6 +108,7 @@ def _leader_payloads(leaders_df: pd.DataFrame, fallback_date: str) -> list[dict[
                 "trade_date": _row_trade_date(item, fallback_date),
                 "session": _to_text(item.get("session")) or "prev_close",
                 "data_source": _to_text(item.get("data_source")) or "未知",
+                "source": _to_text(item.get("source")) or "live",
                 "板块": sector_name,
                 "代码": ticker,
                 "涨跌幅%": _to_float(item.get("涨跌幅%")),
@@ -128,6 +130,7 @@ def save_sector_snapshot(
     设计要点：
     - 使用 Supabase upsert，唯一键由 schema 保证，同一交易日重复保存会覆盖。
     - trade_date 来自数据源对应交易日；session 统一标为 prev_close，诚实标注隔夜收盘口径。
+    - 前向自动保存统一标记 source=live；历史回填脚本会标记 source=backfill。
     - 保存原始数值指标，未来即使热度公式变化，也能用历史涨跌幅/RVOL 重算。
     - client 为空时友好失败，不抛异常，避免影子组合页崩溃。
     """
