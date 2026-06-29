@@ -219,6 +219,18 @@ def _format_volume(value: float) -> str:
     return f"{value:.0f}"
 
 
+def calculate_sector_heat_score(change_pct: float, rvol: float) -> float:
+    """板块热度分公式；前向雷达和历史回填必须共用这一处。"""
+
+    return float(change_pct) + min(max(float(rvol) - 1, -1), 4) * 2
+
+
+def calculate_leader_score(change_pct: float, rvol: float) -> float:
+    """板块龙头分公式；保持和 build_sector_radar 的排序口径一致。"""
+
+    return float(change_pct) + min(float(rvol), 5) * 1.5
+
+
 def _radar_metadata(rows: list[dict[str, object]]) -> dict[str, str]:
     """汇总本次雷达结果的来源标签，页面用于诚实提示。"""
 
@@ -244,7 +256,7 @@ def build_sector_radar(api_key: str | None, top_sector_count: int = 5) -> dict[s
             continue
         rvol = float(etf_snapshot["rvol"])
         change_pct = float(etf_snapshot["change_pct"])
-        heat_score = change_pct + min(max(rvol - 1, -1), 4) * 2
+        heat_score = calculate_sector_heat_score(change_pct, rvol)
         sector_rows.append(
             {
                 "板块": sector_name,
@@ -295,7 +307,7 @@ def build_sector_radar(api_key: str | None, top_sector_count: int = 5) -> dict[s
             continue
 
         stock_df = pd.DataFrame(stock_rows)
-        stock_df["龙头分"] = stock_df["涨跌幅%"] + stock_df["RVOL"].clip(upper=5) * 1.5
+        stock_df["龙头分"] = stock_df.apply(lambda row: calculate_leader_score(row["涨跌幅%"], row["RVOL"]), axis=1)
         leaders = stock_df.sort_values(["龙头分", "成交额"], ascending=False).head(3)
         leader_rows.extend(leaders[["板块", "代码", "涨跌幅%", "成交量", "RVOL", "data_source", "trade_date", "session"]].to_dict("records"))
 
