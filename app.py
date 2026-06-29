@@ -1,4 +1,4 @@
-"""盘前雷达首页：今日作战简报。"""
+"""市场雷达首页：今日作战简报。"""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from src.ui.theme import CYAN, inject_global_styles, metric_card, signed_color
 
 
 st.set_page_config(
-    page_title="盘前雷达 Pre-Market Radar",
+    page_title="市场雷达 Market Radar",
     page_icon="📊",
     layout="centered",
 )
@@ -117,14 +117,21 @@ with st.spinner("正在生成今日作战简报..."):
 sectors_df = safe_dataframe(radar.get("sectors"))
 leaders_df = safe_dataframe(radar.get("leaders"))
 followers_df = safe_dataframe(radar.get("followers"))
+metadata = radar.get("metadata") if isinstance(radar.get("metadata"), dict) else {}
+data_source = str(metadata.get("data_source") or "未知")
+trade_date = str(metadata.get("trade_date") or "未知")
+session = str(metadata.get("session") or "prev_close")
 
 top_sector = sectors_df.iloc[0] if not sectors_df.empty else None
 top_leader = leaders_df.iloc[0] if not leaders_df.empty else None
 top_follower = followers_df.iloc[0] if not followers_df.empty else None
 
-st.markdown("<div class='pmr-kicker'>PRE-MARKET RADAR</div>", unsafe_allow_html=True)
+st.markdown("<div class='pmr-kicker'>MARKET RADAR</div>", unsafe_allow_html=True)
 st.markdown("<div class='pmr-title'>今日作战简报</div>", unsafe_allow_html=True)
-st.caption(f"更新时间：{datetime.now().strftime('%Y-%m-%d %H:%M')} · 免费数据可能延迟，结果仅作盘前观察")
+st.caption(
+    f"更新时间：{datetime.now().strftime('%Y-%m-%d %H:%M')} · 当前板块数据为上一交易日收盘强弱快照，"
+    f"数据来源：{data_source} · 对应交易日：{trade_date} · session：{session}"
+)
 
 st.markdown(
     f"""
@@ -174,13 +181,13 @@ st.markdown(
     "<div class='pmr-grid'>"
     + metric_card("最强板块", strong_sector_main, strong_sector_detail, "强度由 ETF 涨幅 + RVOL 近似计算")
     + metric_card("龙头异动", leader_main, leader_detail, "优先观察成交额与持续性")
-    + metric_card("今日重点关注", focus_main, focus_detail, "补涨逻辑只作观察，不构成建议")
+    + metric_card("今日重点关注", focus_main, focus_detail, "基于隔夜收盘快照观察，不构成建议")
     + "</div>",
     unsafe_allow_html=True,
 )
 
 st.markdown(
-    "<div class='pmr-section'><h3>今日强势板块简表</h3><span class='pmr-muted'>热度 = 涨幅 + RVOL 近似</span></div>",
+    "<div class='pmr-section'><h3>上一交易日强势板块简表</h3><span class='pmr-muted'>热度 = 涨幅 + RVOL 近似</span></div>",
     unsafe_allow_html=True,
 )
 render_sector_table(sectors_df)

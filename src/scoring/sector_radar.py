@@ -45,8 +45,29 @@ def _to_float(value: Any) -> float:
     return float(value)
 
 
-def _fetch_quote(api_key: str | None, ticker: str) -> dict[str, float] | None:
-    """优先用 Finnhub quote；失败时用 yfinance 最近日线补充。"""
+def _timestamp_to_date(value: Any) -> str:
+    """把 Finnhub/yfinance 的时间戳统一转成交易日文本。"""
+
+    try:
+        timestamp = int(value)
+        if timestamp > 0:
+            return datetime.fromtimestamp(timestamp, timezone.utc).date().isoformat()
+    except (TypeError, ValueError, OSError):
+        pass
+    return ""
+
+
+def _index_to_trade_date(value: Any) -> str:
+    """从 yfinance 日线索引安全提取最后一根 K 线日期。"""
+
+    try:
+        return pd.Timestamp(value).date().isoformat()
+    except (TypeError, ValueError):
+        return ""
+
+
+def _fetch_quote(api_key: str | None, ticker: str) -> dict[str, object] | None:
+    """优先用 Finnhub quote；失败时用 yfinance 最近日线补充，并明确标注来源。"""
 
     if api_key:
         try:
@@ -54,32 +75,49 @@ def _fetch_quote(api_key: str | None, ticker: str) -> dict[str, float] | None:
             current = float(data.get("c") or 0)
             previous_close = float(data.get("pc") or 0)
             if current > 0 and previous_close > 0:
-                return {"price": current, "previous_close": previous_close}
+                return {
+                    "price": current,
+                    "previous_close": previous_close,
+                    "trade_date": _timestamp_to_date(data.get("t")),
+                    "data_source": "finnhub",
+                }
         except Exception:
             pass
 
     try:
         hist = safe_download(ticker, period="5d", interval="1d")
         if len(hist) >= 2:
-            return {"price": _to_float(hist["Close"].iloc[-1]), "previous_close": _to_float(hist["Close"].iloc[-2])}
+            return {
+                "price": _to_float(hist["Close"].iloc[-1]),
+                "previous_close": _to_float(hist["Close"].iloc[-2]),
+                "trade_date": _index_to_trade_date(hist.index[-1]),
+                "data_source": "yfinance",
+            }
     except Exception:
         return None
     return None
 
 
-def _fetch_volume_stats(api_key: str | None, ticker: str) -> dict[str, float] | None:
-    """读取今日成交量和 20 日均量；失败返回 None。"""
+def _fetch_volume_stats(api_key: str | None, ticker: str) -> dict[str, object] | None:
+    """读取最近日线成交量和 20 日均量；失败返回 None，并明确标注来源。"""
 
     if api_key:
         try:
             now = datetime.now(timezone.utc)
             data = _finnhub_get("stock/candle", api_key, {"symbol": ticker, "resolution": "D", "from": int((now - timedelta(days=45)).timestamp()), "to": int(now.timestamp())})
             volumes = [float(value) for value in data.get("v", []) if value is not None]
+            timestamps = data.get("t", [])
             if len(volumes) >= 21:
                 today_volume = volumes[-1]
                 avg_volume20 = sum(volumes[-21:-1]) / 20
                 if avg_volume20 > 0:
-                    return {"volume": today_volume, "avg_volume20": avg_volume20}
+                    trade_date = _timestamp_to_date(timestamps[-1]) if timestamps else ""
+                    return {
+                        "volume": today_volume,
+                        "avg_volume20": avg_volume20,
+                        "trade_date": trade_date,
+                        "data_source": "finnhub",
+                    }
         except Exception:
             pass
 
@@ -90,13 +128,18 @@ def _fetch_volume_stats(api_key: str | None, ticker: str) -> dict[str, float] | 
             today_volume = _to_float(volumes.iloc[-1])
             avg_volume20 = _to_float(volumes.iloc[-21:-1].mean())
             if avg_volume20 > 0:
-                return {"volume": today_volume, "avg_volume20": avg_volume20}
+                return {
+                    "volume": today_volume,
+                    "avg_volume20": avg_volume20,
+                    "trade_date": _index_to_trade_date(volumes.index[-1]),
+                    "data_source": "yfinance",
+                }
     except Exception:
         return None
     return None
 
 
-def _fetch_yfinance_snapshot(ticker: str) -> dict[str, float] | None:
+def _fetch_yfinance_snapshot(ticker: str) -> dict[str, object] | None:
     """用一次 yfinance 日线下载同时计算价格、涨跌幅、成交量和 RVOL。"""
 
     try:
@@ -115,28 +158,49 @@ def _fetch_yfinance_snapshot(ticker: str) -> dict[str, float] | None:
             return None
         change_pct = (price - previous_close) / previous_close * 100
         rvol = volume / avg_volume20
-        return {"price": price, "change_pct": change_pct, "volume": volume, "rvol": rvol, "dollar_volume": price * volume}
+        return {
+            "price": price,
+            "change_pct": change_pct,
+            "volume": volume,
+            "rvol": rvol,
+            "dollar_volume": price * volume,
+            "data_source": "yfinance",
+            "trade_date": _index_to_trade_date(hist.index[-1]),
+            "session": "prev_close",
+        }
     except Exception:
         return None
 
 
-def _fetch_ticker_snapshot(api_key: str | None, ticker: str) -> dict[str, float] | None:
-    """整合价格、涨跌幅、成交量、RVOL 和成交额。"""
+def _fetch_ticker_snapshot(api_key: str | None, ticker: str) -> dict[str, object] | None:
+    """整合价格、涨跌幅、成交量、RVOL 和成交额，并标明这是隔夜收盘口径。"""
 
     if api_key:
         quote = _fetch_quote(api_key, ticker)
         volume_stats = _fetch_volume_stats(api_key, ticker)
         if quote and volume_stats:
-            previous_close = quote["previous_close"]
-            change_pct = (quote["price"] - previous_close) / previous_close * 100
-            volume = volume_stats["volume"]
-            rvol = volume / volume_stats["avg_volume20"]
-            return {"price": quote["price"], "change_pct": change_pct, "volume": volume, "rvol": rvol, "dollar_volume": quote["price"] * volume}
+            price = float(quote["price"])
+            previous_close = float(quote["previous_close"])
+            volume = float(volume_stats["volume"])
+            avg_volume20 = float(volume_stats["avg_volume20"])
+            change_pct = (price - previous_close) / previous_close * 100
+            rvol = volume / avg_volume20
+            data_source = "finnhub" if quote.get("data_source") == "finnhub" and volume_stats.get("data_source") == "finnhub" else "yfinance"
+            return {
+                "price": price,
+                "change_pct": change_pct,
+                "volume": volume,
+                "rvol": rvol,
+                "dollar_volume": price * volume,
+                "data_source": data_source,
+                "trade_date": str(quote.get("trade_date") or volume_stats.get("trade_date") or ""),
+                "session": "prev_close",
+            }
 
     return _fetch_yfinance_snapshot(ticker)
 
 
-def fetch_ticker_snapshot(api_key: str | None, ticker: str) -> dict[str, float] | None:
+def fetch_ticker_snapshot(api_key: str | None, ticker: str) -> dict[str, object] | None:
     """公开给影子组合引擎使用的单票快照；失败返回 None，不影响页面加载。"""
 
     try:
@@ -155,6 +219,18 @@ def _format_volume(value: float) -> str:
     return f"{value:.0f}"
 
 
+def _radar_metadata(rows: list[dict[str, object]]) -> dict[str, str]:
+    """汇总本次雷达结果的来源标签，页面用于诚实提示。"""
+
+    sources = sorted({str(row.get("data_source") or "") for row in rows if row.get("data_source")})
+    dates = sorted({str(row.get("trade_date") or "") for row in rows if row.get("trade_date")}, reverse=True)
+    return {
+        "data_source": sources[0] if len(sources) == 1 else "混合" if sources else "未知",
+        "trade_date": dates[0] if dates else "未知",
+        "session": "prev_close",
+    }
+
+
 def build_sector_radar(api_key: str | None, top_sector_count: int = 5) -> dict[str, object]:
     """生成板块强弱榜、龙头和跟风候选。"""
 
@@ -169,10 +245,27 @@ def build_sector_radar(api_key: str | None, top_sector_count: int = 5) -> dict[s
         rvol = float(etf_snapshot["rvol"])
         change_pct = float(etf_snapshot["change_pct"])
         heat_score = change_pct + min(max(rvol - 1, -1), 4) * 2
-        sector_rows.append({"板块": sector_name, "代表ETF": sector_config["etf"], "涨跌幅%": change_pct, "RVOL": rvol, "热度分": heat_score})
+        sector_rows.append(
+            {
+                "板块": sector_name,
+                "代表ETF": sector_config["etf"],
+                "涨跌幅%": change_pct,
+                "RVOL": rvol,
+                "热度分": heat_score,
+                "data_source": str(etf_snapshot.get("data_source") or "未知"),
+                "trade_date": str(etf_snapshot.get("trade_date") or ""),
+                "session": "prev_close",
+            }
+        )
 
     if not sector_rows:
-        return {"status": RadarStatus(False, "暂时没有可用的板块数据。周末、休市或免费数据源延迟时可能出现这种情况。"), "sectors": pd.DataFrame(), "leaders": pd.DataFrame(), "followers": pd.DataFrame()}
+        return {
+            "status": RadarStatus(False, "暂时没有可用的板块数据。周末、休市或数据源延迟时可能出现这种情况。"),
+            "metadata": {"data_source": "未知", "trade_date": "未知", "session": "prev_close"},
+            "sectors": pd.DataFrame(),
+            "leaders": pd.DataFrame(),
+            "followers": pd.DataFrame(),
+        }
 
     sectors_df = pd.DataFrame(sector_rows).sort_values("热度分", ascending=False).reset_index(drop=True)
     strong_sectors = sectors_df.head(top_sector_count)
@@ -193,6 +286,9 @@ def build_sector_radar(api_key: str | None, top_sector_count: int = 5) -> dict[s
                     "成交量文本": _format_volume(float(snapshot["volume"])),
                     "RVOL": float(snapshot["rvol"]),
                     "成交额": float(snapshot["dollar_volume"]),
+                    "data_source": str(snapshot.get("data_source") or "未知"),
+                    "trade_date": str(snapshot.get("trade_date") or ""),
+                    "session": "prev_close",
                 }
             )
         if not stock_rows:
@@ -201,10 +297,16 @@ def build_sector_radar(api_key: str | None, top_sector_count: int = 5) -> dict[s
         stock_df = pd.DataFrame(stock_rows)
         stock_df["龙头分"] = stock_df["涨跌幅%"] + stock_df["RVOL"].clip(upper=5) * 1.5
         leaders = stock_df.sort_values(["龙头分", "成交额"], ascending=False).head(3)
-        leader_rows.extend(leaders[["板块", "代码", "涨跌幅%", "成交量", "RVOL"]].to_dict("records"))
+        leader_rows.extend(leaders[["板块", "代码", "涨跌幅%", "成交量", "RVOL", "data_source", "trade_date", "session"]].to_dict("records"))
 
         leader_change = float(leaders["涨跌幅%"].max()) if not leaders.empty else 0.0
         followers = stock_df[(stock_df["涨跌幅%"] >= -1.5) & (stock_df["涨跌幅%"] <= max(leader_change - 1.0, 3.0)) & (stock_df["RVOL"] >= 1.2)].sort_values(["RVOL", "涨跌幅%"], ascending=False).head(4)
-        follower_rows.extend(followers[["板块", "代码", "涨跌幅%", "RVOL"]].to_dict("records"))
+        follower_rows.extend(followers[["板块", "代码", "涨跌幅%", "RVOL", "data_source", "trade_date", "session"]].to_dict("records"))
 
-    return {"status": RadarStatus(True, "板块雷达数据已更新"), "sectors": sectors_df, "leaders": pd.DataFrame(leader_rows), "followers": pd.DataFrame(follower_rows)}
+    return {
+        "status": RadarStatus(True, "板块雷达数据已更新（隔夜收盘口径）"),
+        "metadata": _radar_metadata(sector_rows + leader_rows),
+        "sectors": sectors_df,
+        "leaders": pd.DataFrame(leader_rows),
+        "followers": pd.DataFrame(follower_rows),
+    }

@@ -134,7 +134,7 @@ def build_market_temperature() -> MarketTemperature:
             label="防守",
             signal_code="RISK-OFF",
             color=RED,
-            summary="VIX 偏高或进攻板块落后，SPY 也偏弱，盘前更适合降低追高欲望，优先等确认和止损纪律。",
+            summary="VIX 偏高或进攻板块落后，SPY 也偏弱，更适合降低追高欲望，优先等确认和止损纪律。",
             vix=vix,
             offensive_strength=offensive_strength,
             defensive_strength=defensive_strength,
