@@ -10,6 +10,7 @@ st.set_page_config(page_title='Ben AI Trading · 全池研究',layout='wide')
 st.title('Ben AI Trading · 全池研究')
 st.caption('Alpaca Basic · 历史 SIP · 本地研究与现金观察 · 无券商下单')
 base=root();research=base/'research'
+structure_names={'SHARED':'共享策略','PER_SYMBOL':'逐股策略','HYBRID_REGIME':'共享市场状态策略','FIXED_LEGACY':'旧固定基线'}
 st.info(f'数据实际保存在：{base}。本地磁盘持久保存；电脑休眠或关机时后台不会执行。')
 tabs=st.tabs(['任务总览','全量自选池','数据质量','个股研究','策略比较','历史组合','前向虚拟盘'])
 with tabs[0]:
@@ -55,6 +56,7 @@ with tabs[3]:
     st.dataframe(pd.DataFrame([{k:v for k,v in t.items() if k not in ('development','parameters')}|t['development'] for t in trials if t['symbol']==chosen]),use_container_width=True)
     st.caption('上述为开发区间 all 复权标准金额事件诊断；不代表可执行账户收益。短历史标的没有借用最终保留区间训练。')
 with tabs[4]:
+    st.caption('历史标识 HYBRID_REGIME 实际是共享市场状态策略：全池共用 up/down 选择，未进行个股参数适配。')
     st.dataframe(pd.DataFrame(read(research/'promotion.json',[])),use_container_width=True)
     with st.expander('研究预注册'):st.json(read(base/'preregistration.json',{}))
     with st.expander('统计量与适用限制'):st.json(read(research/'statistics.json',{}))
@@ -63,7 +65,7 @@ with tabs[5]:
     st.warning('5500 美元单账户回放均标记研究诊断：公司行动完整性、股息付款日和日线成交时点未完全核实，不据此启动交易。')
     portfolio=read(research/'portfolio.json',[])
     st.dataframe(pd.DataFrame([{k:v for k,v in row.items() if not isinstance(v,dict)} for row in portfolio]),use_container_width=True)
-    name=st.selectbox('账户曲线',['SHARED','PER_SYMBOL','HYBRID_REGIME','FIXED_LEGACY'])
+    name=st.selectbox('账户曲线',['SHARED','PER_SYMBOL','HYBRID_REGIME','FIXED_LEGACY'],format_func=lambda x:structure_names[x])
     curve=research/(name+'-base-equity.parquet')
     if curve.exists():
         f=pd.read_parquet(curve);st.line_chart(f.set_index('date')[['equity']]);st.dataframe(f.tail(20),use_container_width=True)

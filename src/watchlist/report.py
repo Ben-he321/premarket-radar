@@ -6,6 +6,25 @@ from .engine import metrics
 from .research import slice_events
 
 
+TRADE_COLUMNS = ['symbol', 'signal_date', 'entry_date', 'exit_date', 'qty',
+                 'entry', 'exit', 'net_pnl', 'return_net', 'reason', 'strategy']
+
+
+def read_trades(path):
+    """Absent files are explicitly reported, never claimed to prove zero fills."""
+    if not path.exists():
+        return pd.DataFrame(columns=TRADE_COLUMNS), 'MISSING_TRADE_FILE'
+    trades = pd.read_parquet(path)
+    missing = set(TRADE_COLUMNS) - set(trades.columns)
+    if missing and len(trades):
+        raise ValueError('TRADE_SCHEMA_MISSING:' + ','.join(sorted(missing)))
+    return trades.reindex(columns=TRADE_COLUMNS), 'EMPTY_TRADE_FILE' if trades.empty else 'PRESENT'
+
+
+def percent_or_na(value):
+    return 'N/A' if value is None or pd.isna(value) else f'{value:.2%}'
+
+
 def produce():
     base=root();out=base/'research';u=read(base/'universe.json');cov=read(base/'coverage.json',[])
     reports=[];strategy=[];selection=[]
@@ -44,19 +63,19 @@ def produce():
     for p in portfolios:
         stem=p['structure']+'-'+p['cost_case']
         curve=pd.read_parquet(out/(stem+'-equity.parquet'))
-        trade_path=out/(stem+'-trades.parquet');t=pd.read_parquet(trade_path) if trade_path.exists() else pd.DataFrame()
+        trade_path=out/(stem+'-trades.parquet');t,trade_status=read_trades(trade_path)
         invested=curve.equity-curve.cash-curve.unsettled-curve.dividend_receivable
         turnover=float((t.qty*(t.entry+t.exit)).sum()/curve.equity.mean()) if len(t) else 0
         account_metrics.append({'structure':p['structure'],'cost_case':p['cost_case'],'start':curve.date.iloc[0],'end':curve.date.iloc[-1],
                                 'starting_equity':5500,'ending_equity':p['ending_equity'],'net_return':p['ending_equity']/5500-1,
                                 'max_drawdown':p['max_drawdown'],'average_capital_utilization':float((invested/curve.equity).mean()),
                                 'completed_trade_notional_turnover':turnover,'closed_trades':len(t),'open_positions_at_end':int(curve.positions.iloc[-1]),
-                                'basis':'RAW_ACTIONS_DIAGNOSTIC','annualization':'NOT_USED'})
+                                'basis':'RAW_ACTIONS_DIAGNOSTIC','annualization':'NOT_USED','trade_file_status':trade_status})
     write(out/'account_metrics.json',account_metrics)
     for name in ('SHARED','PER_SYMBOL','HYBRID_REGIME'):
         b=next(r for r in portfolios if r['structure']==name and r['cost_case']=='base')
         stress=next(r for r in portfolios if r['structure']==name and r['cost_case']=='stress25')
-        t=pd.read_parquet(out/(name+'-base-trades.parquet'))
+        t,trade_status=read_trades(out/(name+'-base-trades.parquet'))
         cutoff=read(base/'preregistration.json')['holdout_start'];t=t[t.exit_date<cutoff]
         positive=t.net_pnl.clip(lower=0).sum();largest=float(t.net_pnl.clip(lower=0).max()/positive) if positive else None
         windows=[]
@@ -68,7 +87,10 @@ def produce():
                           'net_expectancy':b['outer']['expectancy'],'stress25_expectancy':stress['outer']['expectancy'],
                           'largest_trade_positive_profit_share':largest,
                           'largest_window_positive_profit_share':max(windows)/positive_windows if positive_windows else None,
-                          'qualified':False,'blockers':['NEGATIVE_BASE_OR_STRESS_EXPECTANCY'] if (b['outer']['expectancy'] or 0)<=0 or (stress['outer']['expectancy'] or 0)<0 else [],
+                          'trade_file_status':trade_status,
+                          'qualified':False,'blockers':(['MISSING_TRADE_FILE'] if trade_status=='MISSING_TRADE_FILE' else []) +
+                          (['NO_COMPLETED_OUTER_TRADES'] if t.empty else []) +
+                          (['NEGATIVE_BASE_OR_STRESS_EXPECTANCY'] if (b['outer']['expectancy'] or 0)<=0 or (stress['outer']['expectancy'] or 0)<0 else []),
                           'engineering_blockers':['ACTIONS_COMPLETENESS_UNKNOWN','DAILY_OPEN_EXECUTION_SEMANTICS_UNVERIFIED']})
     write(out/'promotion.json',promotion)
     write(out/'improvements.json',{'limit':3,'used':0,'reason':'Kept preregistered simple rules; no performance-driven search after holdout','champion':None,'challengers':12})
@@ -83,7 +105,7 @@ def produce():
         lines.append(f"|{r['symbol']}|{r['type']}|{r['status']}|{c.get('rows',0)}|{c.get('first')} → {c.get('last')}|{issues}; 公司行动完整性 UNKNOWN|")
     lines+=['','## 账户诊断（统一初始 $5500）','|结构|期末权益|最大回撤|外层净期望/笔|最终保留区间净期望/笔|','|---|---:|---:|---:|---:|']
     for p in portfolios:
-        if p['cost_case']=='base':lines.append(f"|{p['structure']}|${p['ending_equity']:.2f}|{p['max_drawdown']:.2%}|{p['outer']['expectancy']:.2%}|{p['holdout']['expectancy']:.2%}|")
+        if p['cost_case']=='base':lines.append(f"|{p['structure']}|${p['ending_equity']:.2f}|{percent_or_na(p['max_drawdown'])}|{percent_or_na(p['outer']['expectancy'])}|{percent_or_na(p['holdout']['expectancy'])}|")
     lines+=['','数据逐日缺口和隔离记录见 candidate_results.json；逐股策略见 research/per_stock_strategy_table.csv。',
             '训练/验证/外层选择记录见 research/selection_evidence.json；一次最终保留检验见 research/holdout_receipt.json。',
             '费用是研究假设；股息付款日、部分公司行动及扩展时段可成交口径待核实。',
