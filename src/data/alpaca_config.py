@@ -2,6 +2,7 @@
 from dataclasses import dataclass, field
 from datetime import date
 import os
+import tomllib
 from pathlib import Path
 from typing import Mapping
 
@@ -31,6 +32,17 @@ class DataConfig:
 
 
 def load_config(secrets: Mapping | None = None) -> DataConfig:
+    if secrets is None:
+        # CLI and the page use the same explicit global -> project -> env policy.
+        secrets = {}
+        override = os.environ.get("ALPACA_SECRETS_FILE")
+        paths = [Path(override)] if override else [Path.home() / ".streamlit/secrets.toml", PROJECT_ROOT / ".streamlit/secrets.toml"]
+        for file in paths:
+            if file.exists():
+                try:
+                    secrets.update(tomllib.loads(file.read_text(encoding="utf-8-sig")))
+                except (ValueError, OSError):
+                    raise ValueError("INVALID_SECRETS_CONFIG") from None
     def read(name):
         try:
             value = secrets.get(name, "") if secrets is not None else ""

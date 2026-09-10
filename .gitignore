@@ -9,3 +9,7 @@ data/alpaca/
 *.duckdb
 *.duckdb.wal
 *.zip
+.runtime/
+vendor/
+*.sqlite*
+TASK_STATE.json

@@ -1,0 +1,8 @@
+{
+  "policy": "Pinned local optional tools; never execute synthetic data demos",
+  "skills": [
+    {"repository":"quantskills/skill-quant-factor-skill-factory","commit":"d0fae3882bdf4b141ee56a939a3ce6f4e59700aa","license":"GPL-3.0","local":"vendor/quant-factor-factory/quant-factor-factory","use":"catalog only; full external core missing"},
+    {"repository":"quantskills/skill-factor-orthogonalize","commit":"36972acf62e37f9f5dd40504422d57ec561dee21","license":"GPL-3.0","local":"vendor/factor-orthogonalize/factor-orthogonalize","use":"audited only; optional training correlation implemented locally"},
+    {"repository":"quantskills/skill-backtest-overfit","commit":"c6c01622193d85340e156bd6fc5c16f1808f8a01","license":"GPL-3.0","local":"vendor/backtest-overfit/backtest-overfit","use":"pure DSR/PBO functions; known-answer tests and real development matrix"}
+  ]
+}

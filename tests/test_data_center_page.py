@@ -5,7 +5,10 @@ from streamlit.testing.v1 import AppTest
 
 def test_page_without_credentials():
     page = Path(__file__).resolve().parents[1] / "pages" / "11_数据中心.py"
-    app = AppTest.from_file(str(page), default_timeout=30).run()
+    app = AppTest.from_file(str(page), default_timeout=30)
+    app.secrets['ALPACA_API_KEY']=''
+    app.secrets['ALPACA_SECRET_KEY']=''
+    app.run()
     assert not app.exception
     assert not app.error
     assert any("缺少凭证" in item.value for item in app.warning)
