@@ -2,3 +2,8 @@ streamlit==1.46.1
 requests==2.32.4
 yfinance==1.4.1
 plotly==6.2.0
+alpaca-py==0.44.0
+duckdb==1.5.5
+pyarrow==25.0.1
+pandas-market-calendars==5.4.0
+filelock==3.32.6
