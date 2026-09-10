@@ -12,7 +12,8 @@ import pandas as pd
 import requests
 
 from .alpaca_calendar import request_bounds
-from .alpaca_config import DataConfig, PROBE_SYMBOLS
+from .alpaca_config import DataConfig, PROBE_SYMBOLS, PROJECT_ROOT
+from .alpaca_rate import SharedRateLimiter
 
 COLUMNS = ["symbol", "timestamp_original", "timestamp", "trade_date", "open", "high",
            "low", "close", "volume", "trade_count", "vwap"]
@@ -27,6 +28,8 @@ class DataAccessError(Exception):
 
 def error_code(exc):
     status = getattr(exc, "status_code", None)
+    if status in (403, 422) and "subscription does not permit" in str(exc).lower():
+        return "SIP_PERMISSION_DENIED"
     if status in (401, 403):
         return "AUTH_OR_PERMISSION_DENIED"
     # Alpaca also uses HTTP 422 for SIP subscription denial.
@@ -50,11 +53,13 @@ class PacedStockClient(StockHistoricalDataClient):
         self._retry = 0
         self.interval = 60 / config.requests_per_minute
         self.last_request = 0.0
+        self.shared_limiter = SharedRateLimiter(PROJECT_ROOT / ".runtime" / "alpaca-rate.sqlite", config.requests_per_minute)
 
     def _one_request(self, method, url, opts, retry):
         if method != "GET" or urlparse(url).netloc != "data.alpaca.markets":
             raise DataAccessError("READ_ONLY_ENDPOINT_REQUIRED")
         for attempt in range(4):
+            self.shared_limiter.acquire()
             time.sleep(max(0, self.interval - (time.monotonic() - self.last_request)))
             self.last_request = time.monotonic()
             try:

@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "candidates": ["MRVL","NOW","CRCL","AMBA","SKHY","META","ALAB","AMD","BATL","MU","NG","IAG","CDE","EGO","GLW","SNDK","QCOM","LITE","WDC","C","TEAM","SM","RXT","PTRN","TSLA","AAPL","PLTR","MSFT","ORCL","HYMC","AMAT","NVDA","AXTI","RIVN","ANET","AVGO","NBIS","CLSK","OKLO","AMZN","STX","ECHO","BMNR","GOOGL","SIDU","MSTR","BE","INFQ","CCXI","QNT","AAOI","SMCI","IREN","MRNA","USAR","SPCX","REZI","WULF","DPZ","RKLB","DXYZ","AVAV","ALIT","FCEL","VELO","XE"],
+  "references": ["SPY","QQQ","SOXX"],
+  "special_identity_review": ["SPCX","CCXI","ECHO","SKHY","SNDK","NBIS","INFQ","QNT","PTRN","VELO","XE"],
+  "history_start": "2016-01-01",
+  "security_policy": "US-listed common/ordinary shares, ADR/ADS; DXYZ separate CEF. Exclude ETF/ETN, warrants, units, options, futures, indices, tokens. Current-watchlist retrospective sample has survivorship/selection bias."
+}
