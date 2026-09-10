@@ -2,3 +2,10 @@
 __pycache__/
 .streamlit/secrets.toml
 data/trade_journal.json
+.venv/
+.pytest_cache/
+data/alpaca/
+*.parquet
+*.duckdb
+*.duckdb.wal
+*.zip

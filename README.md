@@ -1,5 +1,11 @@
 # 盘前雷达 Pre-Market Radar
 
+## AI-M1 · Alpaca 数据中心（新增）
+
+新增独立的 **数据中心** 页面，支持 Alpaca SIP 历史/最新权限分别检查、18 标的日线 raw/all 下载、断点续传、增量核对、Parquet/DuckDB 查询与 ZIP 导出。保留原页面、策略和影子账本；不会接入交易账户或自动回退到合成数据。
+
+请先阅读 [AI-M1 安装、范围、数据口径与验收说明](docs/AI-M1.md)。配置 `ALPACA_API_KEY`、`ALPACA_SECRET_KEY`；可通过 `ALPACA_DATA_DIR` 选择专用数据目录。缺少凭证时真实数据验收为待验证。未来模块初始资金仅记录为 5500 USD，不重置现有账户。
+
 盘前雷达是一个美股盘前分析 App。当前仓库处于 M1 阶段，已经在「晨报」页接入 Finnhub 免费数据，用固定股票池展示盘前/最新行情 gap scanner。
 
 ## 本地运行
