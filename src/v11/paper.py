@@ -140,12 +140,14 @@ class Account:
                 # Process at most one session per call; restart catches up existing intents only.
                 day=start.astimezone(NY).date();bounds=schedule(day)
                 if not bounds:continue
+                blocked=False
                 for a in (actions or {}).get(str(day),[]):
                     if a['symbol']!=symbol:continue
                     if a['kind']=='split' and p['entry_date']<str(day):l.split(symbol,a['ratio'],a['id'])
                     elif a['kind']=='dividend' and p['entry_date']<str(day):l.dividend(symbol,a['rate'],a['id'],a.get('pay_date'))
                     elif a['kind']=='BLOCK':
-                        p['execution_status']='ACTION_REVIEW_REQUIRED';self.save(c,l);return
+                        p['execution_status']='ACTION_REVIEW_REQUIRED';blocked=True
+                if blocked:continue
                 end=min(bounds[1],allowed)
                 if end<=start:continue
                 f=market.minutes(symbol,start,end,now=now);f=classify_fields(f) if len(f) else f
@@ -177,29 +179,38 @@ class Account:
                     'unsettled':l.unsettled,'dividend_receivable':l.dividends,'realized_pnl':l.realized,
                     'immutable_intents':c.execute('SELECT count(*) FROM intents').fetchone()[0],
                     'buy_fills':sum(e['type']=='BUY' for e in events),'sell_fills':sum(e['type']=='SELL' for e in events),
+                    'settlement_events':sum(e['type']=='CASH_SETTLEMENT' for e in events),
                     'orders':orders,'status':'WAITING_FOR_SIGNAL' if not orders else 'EXPERIMENT_ACTIVE',
                     'strategy_status':'EXPERIMENTAL_UNPROVEN_NO_CHAMPION_NO_BROKER','checked_at':utc()}
 
-def real_decision_inputs(now,market):
+def real_decision_inputs(now,market,symbols=None):
     """Fresh finalized raw/all data, only in this version's forward cache."""
     from src.watchlist.features import feature_frame,signal
     snap=snapshot();cfg=freeze();spec=next(x for x in cfg['configs'] if x['id']=='FIXED_LEGACY')
     end=finalized_day(now);start=end-timedelta(days=180);frames={};raw={};issues=[]
-    records=snap['universe']['records']+snap['universe']['references']
+    requested=[r for r in snap['universe']['records'] if symbols is None or r['symbol'] in symbols]
+    records=requested+snap['universe']['references']
     for offset in range(0,len(records),6):
         batch=[r['symbol'] for r in records[offset:offset+6]]
         for adj,dest in [('raw',raw),('all',frames)]:
-            try:result=market.daily(batch,start,end,adj)
+            directory=root()/'forward_data'/str(end)/adj;directory.mkdir(parents=True,exist_ok=True)
+            missing=[]
+            for symbol in batch:
+                cached=directory/f'{symbol}.parquet'
+                f=pd.read_parquet(cached) if cached.exists() else pd.DataFrame()
+                if len(f) and str(end) in f.trade_date.values:dest[symbol]=classify_fields(f)
+                else:missing.append(symbol)
+            if not missing:continue
+            try:result=market.daily(missing,start,end,adj)
             except Exception as exc:
-                for symbol in batch:
+                for symbol in missing:
                     dest[symbol]=pd.DataFrame();issues.append({'symbol':symbol,'adjustment':adj,'reason':'REQUEST_FAILED','error_type':type(exc).__name__})
                 continue
-            directory=root()/'forward_data'/str(end)/adj;directory.mkdir(parents=True,exist_ok=True)
-            for symbol in batch:
+            for symbol in missing:
                 f=result[result.symbol==symbol].copy();f.to_parquet(directory/f'{symbol}.parquet',index=False)
                 dest[symbol]=classify_fields(f) if len(f) else f
     candidates=[];benchmark=frames['SPY'];benchmark=benchmark[benchmark.execution_eligible] if len(benchmark) else benchmark
-    for rec in snap['universe']['records']:
+    for rec in requested:
         symbol=rec['symbol'];f=frames[symbol];r=raw[symbol]
         if f.empty or r.empty:issues.append({'symbol':symbol,'reason':'NO_DATA'});continue
         f=feature_frame(f[f.execution_eligible],benchmark)
@@ -212,6 +223,54 @@ def real_decision_inputs(now,market):
                                'identity_verified':rec['status']=='INCLUDED'})
     received=utc();write(root()/'forward_input_status.json',{'received_at':received,'cutoff':str(end),'issues':issues,'candidate_symbols':[c['symbol'] for c in candidates]})
     return candidates,spec,datetime.combine(end+timedelta(days=1),time(),NY).isoformat(),received
+
+def decision_cycle(account,market,now,records,input_loader=None,actions_loader=None,clock_now=None):
+    """Persist per-symbol progress. At most three attempts inside the original window."""
+    input_loader=input_loader or real_decision_inputs;actions_loader=actions_loader or forward_actions
+    clock_now=clock_now or (lambda:datetime.now(timezone.utc))
+    day=now.astimezone(NY).date();directory=account.path.parent
+    path=directory/f'decision-progress-{day}.json'
+    doc=read(path,{'date':str(day),'symbols':{}});states=doc['symbols']
+    for rec in records:
+        s=rec['symbol']
+        states.setdefault(s,{'status':'PERMANENT_BLOCK' if s=='DXYZ' or rec.get('status')!='INCLUDED' else 'PENDING_RETRY',
+                             'attempts':0,'reason':'SCOPE_OR_IDENTITY' if s=='DXYZ' or rec.get('status')!='INCLUDED' else None})
+    first=datetime.combine(day,time(6,30),NY);last=datetime.combine(day,time(9,25),NY)
+    if not schedule(day) or now<first:return doc
+    if now>last:
+        for v in states.values():
+            if v['status'] in ('PENDING_RETRY','RETRY_LIMIT_REACHED'):v.update(status='MISSED_WINDOW',updated_at=now.isoformat())
+        write(path,doc);return doc
+    pending=[s for s,v in states.items() if v['status']=='PENDING_RETRY' and v['attempts']<3 and
+             (not v.get('next_retry') or dt(v['next_retry'])<=now)]
+    if not pending:write(path,doc);return doc
+    for s in pending:states[s].update(attempts=states[s]['attempts']+1,next_retry=(now+timedelta(minutes=1)).isoformat())
+    write(path,doc) # A crash cannot reset the attempt budget.
+    try:
+        candidates,spec,cutoff,received=input_loader(now,market,symbols=pending)
+        issues=read(root()/'forward_input_status.json',{}).get('issues',[])
+        failures={x['symbol']:x.get('reason','REQUEST_FAILED') for x in issues if x['symbol'] in pending}
+        actions=actions_loader(now,market)
+    except Exception as exc:
+        candidates=[];failures={s:type(exc).__name__ for s in pending};actions={};spec=None
+    current=clock_now()
+    blocked={a['symbol'] for d,rows in actions.items() if d>=str(day) for a in rows if a['kind']=='BLOCK' and 'ACTION_ACCESS_FAILURE' not in a['id']}
+    for d,rows in actions.items():
+        if d>=str(day):
+            for a in rows:
+                if 'ACTION_ACCESS_FAILURE' in a['id']:failures[a['symbol']]='ACTION_ACCESS_FAILURE'
+    by_symbol={x['symbol']:x for x in candidates}
+    # Account.decide atomically preserves alphabetical priority among available signals.
+    usable=[x for x in candidates if x['symbol'] not in failures and x['symbol'] not in blocked]
+    if usable and current<=last:account.decide(current,day,usable,spec,cutoff,received)
+    for s in pending:
+        v=states[s];v['updated_at']=current.isoformat()
+        if current>last:v.update(status='MISSED_WINDOW',reason='FETCH_FINISHED_AFTER_DEADLINE')
+        elif s in blocked:v.update(status='PERMANENT_BLOCK',reason='CORPORATE_ACTION_REVIEW')
+        elif s in failures:v.update(status='PENDING_RETRY' if v['attempts']<3 else 'RETRY_LIMIT_REACHED',reason=failures[s])
+        elif s in by_symbol:v.update(status='SIGNAL_COMPLETED',reason='ACCOUNT_INTENT_OR_CAPITAL_GATE_RECORDED')
+        else:v.update(status='NO_SIGNAL_COMPLETED',reason=None)
+    doc['updated_at']=current.isoformat();write(path,doc);return doc
 
 def service():
     import time as clock
@@ -236,13 +295,7 @@ def service():
             if status['positions'] or status['orders'].get('PENDING_BUY'):
                 actions=forward_actions(now,market)
                 account.match(now,market,actions)
-            receipt=p/f'decision-{day}.json'
-            if bounds and time(6,30)<=now.astimezone(NY).time().replace(tzinfo=None)<=time(9,25) and not receipt.exists():
-                candidates,spec,cutoff,received=real_decision_inputs(now,market)
-                actions=forward_actions(now,market)
-                blocked={a['symbol'] for day0,rows in actions.items() if day0>=str(day) for a in rows if a['kind']=='BLOCK'}
-                result=account.decide(datetime.now(timezone.utc),day,[x for x in candidates if x['symbol'] not in blocked],spec,cutoff,received)
-                write(receipt,{'status':result,'recorded_at':utc(),'blocked_symbols':sorted(blocked)})
+            if bounds:decision_cycle(account,market,now,snapshot()['universe']['records'])
         except Exception as exc:
             error={'type':type(exc).__name__,'http_status':getattr(exc,'status_code',None),'at':utc()}
             write(p/'last_error.json',error)
