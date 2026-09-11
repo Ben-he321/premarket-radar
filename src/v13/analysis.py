@@ -34,7 +34,7 @@ def run():
                 row['exact_activity_match']=False;matching.append(row)
     adjusted=by_adjust([x['primary_p'] for x in primary])
     for row,q in zip(primary,adjusted):
-        row['q_by']=float(q);row['positive_increment_exploratory']=q<=.05 and row['mean'] is not None and row['mean']>0
+        row['q_by']=float(q);row['positive_increment_exploratory']=bool(q<=.05 and row['mean'] is not None and row['mean']>0)
         row['positive_absolute_net_profit']=row['net_pnl_usd']>0
         row['promotion']='NOT_PERMITTED_HISTORICAL_REUSED_EXPLORATION'
     for r in rows:

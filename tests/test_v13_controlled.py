@@ -94,3 +94,17 @@ def test_windows_checkpoint_retries_without_losing_data(tmp_path,monkeypatch):
     monkeypatch.setattr(runtime,'atomic_write',busy);monkeypatch.setattr(runtime.time,'sleep',lambda _:None)
     runtime.write(tmp_path/'state.json',{'completed':9})
     assert runtime.read(tmp_path/'state.json')=={'completed':9} and len(calls)==3
+
+def test_round_trip_trade_csv_retains_half_cent_kernel_result(tmp_path):
+    from src.v11.kernel import rounded
+    price=-6.72;dividend=.525*7
+    t=pd.DataFrame([{'price':price,'dividend':dividend,'net':rounded(price+dividend)}])
+    p=tmp_path/'trades.csv';t.to_csv(p,index=False)
+    read=pd.read_csv(p,float_precision='round_trip')
+    assert rounded(read.price.iloc[0]+read.dividend.iloc[0])==read.net.iloc[0]
+
+def test_numpy_false_remains_false_after_report_json_roundtrip(tmp_path):
+    from src.v13.runtime import write,read
+    p=tmp_path/'primary.json';write(p,{'positive_increment_exploratory':np.bool_(False),'count':np.int64(0)})
+    x=read(p)
+    assert x['positive_increment_exploratory'] is False and type(x['count']) is int

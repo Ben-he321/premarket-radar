@@ -37,11 +37,20 @@ def forward_health():
 def validate():
     r=root();p=protocol();accounts=read(r/'account_summaries.json');prior=read(r/'prior_result_hashes.json')
     changed=[name for name,h in prior['files'].items() if not Path(name).exists() or sha(name)!=h]
-    findings=[];trade_count=0;equity_count=0;reconciliations=[]
+    findings=[];trade_count=0;equity_count=0;reconciliations=[];constraints=[]
     for a in accounts:
-        t=pd.read_csv(r/f'accounts/{a["id"]}-trades.csv');c=pd.read_csv(r/f'accounts/{a["id"]}-equity.csv')
+        # Preserve the exact serialized binary floats before applying the shared
+        # Decimal(str(value)) rounding rule, especially at half-cent ties.
+        t=pd.read_csv(r/f'accounts/{a["id"]}-trades.csv',float_precision='round_trip');c=pd.read_csv(r/f'accounts/{a["id"]}-equity.csv',float_precision='round_trip')
         trade_count+=len(t);equity_count+=len(c)
-        if c.date.duplicated().any() or c.date.max()>CUTOFF or c.cash.min()<-.01:findings.append(a['id']+':INVALID_EQUITY_DATES_OR_CASH')
+        if c.date.duplicated().any() or c.date.max()>CUTOFF:findings.append(a['id']+':INVALID_EQUITY_DATES')
+        if c.cash.min()<-.01:
+            bad=c[c.cash<-.01];first=str(bad.date.iloc[0])
+            constraints.append({'account_id':a['id'],'status':'FAILED_NO_OVERDRAFT_CONSTRAINT','first_date':first,
+                                'minimum_cash':float(bad.cash.min()),'affected_sessions':len(bad),
+                                'new_entries_on_or_after_deficit':int((t.entry_date>=first).sum()),
+                                'cause':'Fixed exit fee exceeded remaining liquid cash after final penny-stock exit; unknown-pay-date dividends remain unspendable receivables.',
+                                'policy':'Original trace retained, no cash injection, fee reduction, altered entry reserve or leverage added. This stress scenario is NOT verified executable.'})
         if len(t):
             if t.exit_date.max()>CUTOFF or (t.signal_date>=t.entry_date).any():findings.append(a['id']+':LOOKAHEAD_OR_HOLDOUT')
             if t.symbol.isin(['DXYZ','SPY','QQQ','SOXX']).any():findings.append(a['id']+':EXCLUDED_SECURITY_TRADED')
@@ -61,19 +70,49 @@ def validate():
     assert len(f)==1782 and f.symbol.nunique()==66 and len(d)==990 and len(accounts)==486
     assert len([x for x in accounts if x['kind']=='ACTIVITY_RANDOM'])==450
     save_csv('report_reconciliation.csv',reconciliations)
+    write(r/'execution_constraint_issues.json',{'checked_at':utc(),'issues':constraints,
+          'new_method_or_parameters_added':False,'requires_separate_preregistered_kernel_fee_reserve_fix':bool(constraints)})
     result={'checked_at':utc(),'accounts':len(accounts),'trades':trade_count,'equity_rows':equity_count,'condition_cells':len(f),
             'descriptive_cells':len(d),'candidate_count':f.symbol.nunique(),'changed_prior_files':changed,'prior_files':len(prior['files']),
-            'errors':findings,'max_closed_account_cash_rounding_residual_usd':max((abs(x['cash_rounding_and_open_dividend_residual']) for x in reconciliations if x['all_positions_closed']),default=0.),
-            'status':'PASS' if not findings and not changed else 'FAIL'}
+            'errors':findings,'execution_constraint_failures':constraints,
+            'max_closed_account_cash_rounding_residual_usd':max((abs(x['cash_rounding_and_open_dividend_residual']) for x in reconciliations if x['all_positions_closed']),default=0.),
+            'export_integrity_status':'PASS' if not findings and not changed else 'FAIL',
+            'status':'FAIL_EXECUTION_CONSTRAINT' if constraints and not findings and not changed else 'PASS' if not findings and not changed else 'FAIL'}
     write(r/'result_checks.json',result);return result
 
 def build():
     r=root();p=protocol();checks=validate();health=forward_health()
+    snap=read(r/'input_snapshot.json')
+    write(r/'data_version.json',{'data_version':p['data_version'],'input_snapshot_sha256':sha(r/'input_snapshot.json'),
+          'actions_sha256':sha(r/'actions.json'),'source':'Alpaca SIP cached real historical bars','cutoff':CUTOFF,
+          'adjustments':['raw','all'],'identity_mapping':snap['universe']['records'],
+          'objects':[{k:c.get(k) for k in ['path','start','end','sha256','source_symbol','adjustment','feed','retrieved_at']}
+                     for m in snap['manifests'].values() for a in m.values() for c in a.get('chunks',{}).values()
+                     if c.get('status')=='OK' and c.get('start','9999')<=CUTOFF],
+          'predicate':'trade_date <= 2026-03-10 before feature calculation; objects spanning cutoff are predicate-filtered',
+          'limitations':'Current verified mapping and all adjusted snapshot are not historical point-in-time vintages.'})
     primary=read(r/'primary_nine_tests.json');accounts=read(r/'account_summaries.json');coverage=read(r/'data_coverage.json')
+    from .statistics import by_adjust
+    raw_q=by_adjust([x['p'] for x in primary])
+    save_csv('raw_inference_diagnostics.csv',[{'condition':x['condition'],'horizon':x['horizon'],'raw_p':x['p'],'raw_q_by':float(q),
+             'mean':x['mean'],'claim':'SAME_NINE_TESTS_BEFORE_DATA_GUARD_DIAGNOSTIC_ONLY_NO_PROMOTION'} for x,q in zip(primary,raw_q)])
+    conditional=pd.read_csv(r/'shared_conditions.csv');factor=pd.read_csv(r/'descriptive_factors_990.csv');matching=pd.read_csv(r/'activity_matching_errors.csv')
     calref=read(r/'calibration_receipt.json');cal=read(calref['report']);caldir=Path(calref['temporary_directory'])
     original=read(v11root().parent/'watchlist-v1_2-momentum/MOMENTUM_PROTOCOL.json')
-    lead=[x for x in primary if x['positive_increment_exploratory']]
+    assert all(type(x['positive_increment_exploratory']) is bool for x in primary), 'INVALID_PRIMARY_BOOLEAN_ENCODING'
+    lead=[x for x in primary if x['positive_increment_exploratory'] is True]
     base=[x for x in accounts if x['kind']=='CONDITION' and x['cost_case']=='base'];profitable=[x for x in base if x['net_pnl_usd']>0]
+    from .statistics import summary
+    absolute=[]
+    for a in accounts:
+        if a['kind']=='ACTIVITY_RANDOM':continue
+        c=pd.read_csv(r/f'accounts/{a["id"]}-equity.csv')
+        daily=np.diff(np.r_[5500.,c.equity.to_numpy()])/5500
+        stats=summary(daily)
+        absolute.append({'account_id':a['id'],'net_pnl_usd':a['net_pnl_usd'],
+                         'net_expectancy_per_trade_usd':a['net_expectancy_per_trade_usd'],**stats,
+                         'claim':'DESCRIPTIVE_ABSOLUTE_ACCOUNT_UNCERTAINTY_NOT_ADDITIONAL_PRIMARY_TEST'})
+    save_csv('absolute_account_uncertainty.csv',absolute)
     text=['# V1.3 独立条件与公平对照：实际结果','',
           f'已完成 66 个候选的 9 个条件/周期、1782 个逐股条件分组、990 个原五因子描述单元和全部 486 个共享资金回放（36 个条件/无条件成本情景 + 450 个随机活动对照）。基准条件账户 {len(profitable)}/9 个净盈利；经预定方法与数据质量守门后，正向增量探索线索 {len(lead)}/9 个。',
           f'证据标签：**{LABEL}**。这是受到 V1.2 启发、截至 2026-03-10 的历史探索，绝不是新盲测。没有重刷旧保留期或接入原实验账户。',
@@ -96,7 +135,7 @@ def build():
       'descriptive_factors_990.csv 保留1/5/20/60日及relative20全部15组合状态，Rank IC不用于晋级。原V1.2含区间的描述另原样附上供参照，不冒称本轮新增独立检验。',
       'account_summary.csv、cost_exposure_differences.csv 附全部9条件、3无条件的10bp/25bp/双佣金，全部随机种子只用基准成本。整数股、5500共享资金、0.5%风险、20%单股上限、4持仓、5%止损、无固定止盈保持一致。',
       '资金占用同时给收盘和开盘完成入场后、盘中退出前的时点占用。日线无法证明完整日内路径或时间加权占用，也不能保证代理开盘/止损价的真实成交。',
-      'concentration.csv 分解股票、退出年份和最高5笔盈利交易，供核查是否集中。正净额仍需结合回撤、不确定性及集中度，不能单独推广。',
+      'concentration.csv 分解股票、退出年份和最高5笔盈利交易，供核查是否集中。absolute_account_uncertainty.csv 给36个固定成本账户的绝对日净增量区间和每笔净期望，仅作描述，不加入主检验或用于新增筛选。正净额仍需结合回撤、不确定性及集中度，不能单独推广。',
       '', '## 缺失、未知与保留边界','',
       '开始资格只读取信号日已知数据和训练概率，不用未来缺价或行动删除入场。缺次日开盘的意图记录 NO_EXECUTABLE_BAR，不延后补买；统计标签另要求整个路径完整。缺价持仓保留并标记陈旧估值。',
       '遭遇未知复杂公司行动时保留原价代理轨迹并完整标为 UNVERIFIED_COMPLEX_ACTION；不是可靠可执行业绩。条件或任一对应随机账户有未核实复杂行动、缺价持仓或末日未平仓，该主检验降为描述并令用于BY的p=1。原始计算p另保留，绝不隐藏。',
@@ -111,16 +150,33 @@ def build():
       f'发现什么：基准条件净盈利{len(profitable)}组，方法与数据守门后正向增量探索线索{len(lead)}组，详细差异和限制如上。',
       '还没证明什么：没有证明新盲测可复现优势、完全相同曝险下的Alpha或真实可成交收益。',
       '下一步：有线索也须另立独立前向协议，本轮不自动晋级、不继续追加搜索。']
+    findings=['','## 结果解读与未通过项目','',
+       f'即使仅为诊断而暂不施加公司行动数据守门，同一9项原始p经过BY校正也有 {int(np.sum(np.asarray(raw_q)<=.05))} 项通过；最小q={float(np.min(raw_q)):.4f}。原始p与数据降级后的p同时保留，因此本轮没有把“数据受限”与“效果不足”混成同一个原因。',
+       '基准 M20/H20 净盈利7914.28美元、最大回撤20.72%；RS20/H20盈利4943.17美元、回撤25.52%；REV5/H20盈利3624.68美元、回撤30.59%。对应U/H20盈利4000.41美元，不能把持有更久或少交易本身的收益当作因子增量。',
+       'M20/H20 在25bp与双佣金下仍分别净盈利6081.14、5351.84美元；但相对随机活动对照的主比较95%区间包含0，原始p约0.062，未证明优于对照。RS20/H5只盈利15.88美元，压力成本转亏；M20/H10相对随机对照是负向差异，不能翻转为新信号。',
+       '集中度方面，M20/H20 前5笔盈利合计5567美元，约占账户净盈利70.3%；2024/2025两个退出年份合计5942.07美元，约占75.1%。股票贡献居前的是IREN 1562.38、SM 1431.40、AAOI 1393.89美元。净额份额不是对总盈利交易额的份额，详细绝对盈亏占比另保留；不能将少数大赢单视为普遍稳定优势。',
+       '共享同日期纯标签中，M20三个周期均为略负差，REV5均为略正差，RS20在5/10日略正、20日略负；九个条件减无条件的描述95%区间全部跨0。这里不含5%止损与资金竞争，和账户结果是不同问题。','',
+       '| 因子 | 66候选/三个周期的Rank IC中位数 | 定性边界 |','|---|---:|---|']
+    for name,g in factor.groupby('factor'):findings.append(f'| {name} | {g.time_series_rank_ic.median():.5f} | 描述相关，不是独立有效性或晋级证明 |')
+    findings+=['','相近活动对照仍有实际匹配误差（条件减50随机均值）：','',
+       '| 条件/H | 交易数差 | 收盘占用差 | 开盘后占用差 | 费用差USD |','|---|---:|---:|---:|']
+    for _,x in matching[matching.reference=='RANDOM_ALL_50_MEAN'].iterrows():findings.append(f'| {x.condition}/{x.horizon} | {x.delta_completed_trades:.1f} | {x.delta_close_utilization:.2%} | {x.delta_post_entry_open_utilization:.2%} | {x.delta_total_cost_usd:.2f} |')
+    findings+=['',f'完整报告文件和逐笔算术校验：{checks["export_integrity_status"]}。执行约束验收：**{checks["status"]}**，不能统称全部工程验收通过。',
+       '两个双佣金场景末期分别欠退出费用0.35美元和0.29美元，之后没有新入场。保留原现金负值、净权益及不可支用的股息应收，没有补造资金；这两条成本轨迹不满足零透支约束。要修复应另行冻结预留退出费用的统一内核规则，不能看到本轮收益后悄悄改变资金可用性重跑并覆盖。',
+       '65/486条轨迹遇到未核实复杂行动，包含62条随机对照和3条固定压力场景；9个主比较各有至少一个随机轨迹受影响，全部按冻结规则降为描述。所有问题证券、日期、行动种类、数量及受影响账户均在 account_summaries.json 与 incomplete_and_limits.json；执行欠额另在 execution_constraint_issues.json。',
+       'CSV原有一笔半分边界对账问题已通过round-trip浮点读取修复，未修改交易和权益文件；账户闭合总额与逐笔未舍入股息的最大0.015美元残差来自逐日现金/股息分币舍入，并单独导出。']
+    text[-4:-4]=findings
     (r/'V1_3_RESULTS.md').write_text('\n'.join(text),encoding='utf-8')
     names=['V1_3_RESULTS.md','CONTROLLED_PROTOCOL.json','RUN_BUDGET.json','timeline.json','COMPUTATION_RECEIPT.json',
            'per_stock_conditions.csv','descriptive_factors_990.csv','shared_conditions.csv','shared_condition_daily.csv','frozen_training_probabilities.csv',
            'statistical_label_exclusions.csv','primary_nine_tests.csv','primary_nine_tests.json','account_summary.csv','account_summaries.json',
-           'activity_matching_errors.csv','cost_exposure_differences.csv','concentration.csv','incomplete_and_limits.json','data_coverage.json',
-           'prior_result_hashes.json','result_checks.json','report_reconciliation.csv','forward_health.json','calibration_receipt.json',
-           'TASK_STATE.json','tests.log','engineering_preflight.log','research.stdout.log','research.stderr.log','complex_action_calendar.json']
+           'activity_matching_errors.csv','cost_exposure_differences.csv','concentration.csv','absolute_account_uncertainty.csv','incomplete_and_limits.json','data_coverage.json',
+           'prior_result_hashes.json','result_checks.json','report_reconciliation.csv','forward_health.json','calibration_receipt.json','data_version.json',
+           'TASK_STATE.json','tests.log','engineering_preflight.log','research.stdout.log','research.stderr.log','complex_action_calendar.json',
+           'execution_constraint_issues.json','raw_inference_diagnostics.csv']
     names+=[x.relative_to(r).as_posix() for x in (r/'accounts').glob('*.csv')]
     names+=[x.name for x in r.glob('research.resume*.log')]
-    for name in ['error_history.json','implementation_notes.json','source_equivalence.json','ui_checks.json']:
+    for name in ['error_history.json','implementation_notes.json','source_equivalence.json','ui_checks.json','singleton_check.json']:
         if (r/name).exists():names.append(name)
     paths={n:(r/n).read_bytes() for n in names}
     for name,h in calref['artifact_hashes'].items():
@@ -137,9 +193,15 @@ def build():
               'calibration_is_not_strategy_performance':True}
     write(r/'experiment_manifest.json',manifest);paths['experiment_manifest.json']=(r/'experiment_manifest.json').read_bytes()
     archive=r/'verification_v1_3_controlled_factor_bundle.zip'
-    with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED) as z:
+    temporary=archive.with_suffix('.zip.tmp')
+    with zipfile.ZipFile(temporary,'w',zipfile.ZIP_DEFLATED) as z:
         for name,b in paths.items():z.writestr(name,b)
-    with zipfile.ZipFile(archive) as z:
+    with zipfile.ZipFile(temporary) as z:
         assert z.testzip() is None
         assert all(hashlib.sha256(z.read(n)).hexdigest()==h for n,h in manifest['files'].items())
+    for attempt in range(10):
+        try:temporary.replace(archive);break
+        except PermissionError:
+            if attempt==9:raise
+            time.sleep(.2)
     return {'archive':str(archive),'bytes':archive.stat().st_size,'sha256':sha(archive),'files':len(paths),'checks':checks['status'],'forward_fresh':health['fresh']}

@@ -13,9 +13,16 @@ CONDITIONS = {'M20': ('return_20', 'gt'), 'RS20': ('relative20', 'gt'), 'REV5': 
 FACTORS = ['return_1', 'return_5', 'return_20', 'return_60', 'relative20']
 CODE = Path(__file__).resolve().parents[2]
 
+def json_native(value):
+    if isinstance(value,dict):return {k:json_native(v) for k,v in value.items()}
+    if isinstance(value,(list,tuple)):return [json_native(v) for v in value]
+    if type(value).__module__=='numpy' and hasattr(value,'item'):return value.item()
+    return value
+
 def write(path, value):
     # Windows readers/antivirus can briefly hold the destination open. Preserve
     # atomic replacement and retry the same bytes; never discard a checkpoint.
+    value=json_native(value)
     for attempt in range(10):
         try:return atomic_write(path,value)
         except PermissionError:
