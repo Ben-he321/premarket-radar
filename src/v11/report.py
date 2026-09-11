@@ -141,7 +141,7 @@ def build():
     names+=['candidate_version.json','candidate_action_intervals.json','inherited_bundle.json','operational_checks.json']
     paths=[r/n for n in names if (r/n).is_file()]+list((r/'field_views').glob('*.json'))
     missing=[n for n in names if not (r/n).is_file()]
-    manifest={'generated_at':utc(),'missing':missing,'files':{str(p.relative_to(r)):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}}
+    manifest={'generated_at':utc(),'missing':missing,'files':{p.relative_to(r).as_posix():hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}}
     write(r/'bundle_manifest.json',manifest);paths.append(r/'bundle_manifest.json')
     with zipfile.ZipFile(r/'verification_v1_1_bundle.zip','w',zipfile.ZIP_DEFLATED) as z:
         for p in paths:z.write(p,str(p.relative_to(r)))
