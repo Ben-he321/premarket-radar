@@ -53,5 +53,7 @@ with tabs[6]:
     from src.v13.ui import render as render_v13
     render_v13()
 with tabs[7]:
-    from src.v131.ui import render as render_v131
-    render_v131()
+    # Only reload the read-only view; the separate execution service is untouched.
+    from importlib import reload
+    from src.v131 import ui as v131_ui
+    reload(v131_ui).render()
