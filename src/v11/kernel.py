@@ -127,6 +127,6 @@ def candidate_event(symbol,path,spec,previous_volume,signal_date,metadata=None,r
         if px is not None:
             t=ledger.sell(symbol,px,str(bar.trade_date),i,reason)
             dividend=sum(x['amount'] for x in ledger.dividends)
-            return {'status':'COMPLETED',**t,'dividend_entitlement':dividend,
+            return {'status':'COMPLETED',**t,'price_net_pnl':t['net_pnl'],'dividend_entitlement':dividend,
                     'total_net_pnl':rounded(t['net_pnl']+dividend),'return_net':(t['net_pnl']+dividend)/t['entry_cost']}
     return {'status':'UNMATURED_OR_NO_EXIT_QUOTE','symbol':symbol}
