@@ -76,3 +76,21 @@ def test_hashes_are_reproducible_and_priority_rotates():
     assert uniform(13001,'X','2020-01-01')!=uniform(13002,'X','2020-01-01')
     orders={tuple(sorted(['X','Y'],key=lambda s:priority(s,f'2020-01-{i:02}'))) for i in range(1,30)}
     assert len(orders)==2
+
+def test_empty_qualified_sample_never_expands_to_full_calendar():
+    from src.v13.data import label_frame
+    days,raw,_,_=fixture();f=raw.set_index('trade_date');f['return_20']=.1
+    labels=label_frame(f,f,5);base=labels[np.zeros(len(labels),bool)].copy()
+    base['return_20']=f.return_20.reindex(base.index)
+    assert base.empty and not base.position.isna().any()
+
+def test_windows_checkpoint_retries_without_losing_data(tmp_path,monkeypatch):
+    import src.v13.runtime as runtime
+    original=runtime.atomic_write;calls=[]
+    def busy(path,value):
+        calls.append(1)
+        if len(calls)<3:raise PermissionError('temporary Windows reader lock')
+        return original(path,value)
+    monkeypatch.setattr(runtime,'atomic_write',busy);monkeypatch.setattr(runtime.time,'sleep',lambda _:None)
+    runtime.write(tmp_path/'state.json',{'completed':9})
+    assert runtime.read(tmp_path/'state.json')=={'completed':9} and len(calls)==3

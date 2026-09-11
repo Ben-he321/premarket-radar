@@ -1,16 +1,26 @@
 import os
 import hashlib
 import subprocess
+import time
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from functools import lru_cache
-from src.v11.runtime import read, write, digest, utc, root as v11root, source
+from src.v11.runtime import read, write as atomic_write, digest, utc, root as v11root, source
 
 LABEL = 'HISTORICAL_EXPLORATORY_REUSED_DATA'
 CUTOFF = '2026-03-10'
 CONDITIONS = {'M20': ('return_20', 'gt'), 'RS20': ('relative20', 'gt'), 'REV5': ('return_5', 'lt')}
 FACTORS = ['return_1', 'return_5', 'return_20', 'return_60', 'relative20']
 CODE = Path(__file__).resolve().parents[2]
+
+def write(path, value):
+    # Windows readers/antivirus can briefly hold the destination open. Preserve
+    # atomic replacement and retry the same bytes; never discard a checkpoint.
+    for attempt in range(10):
+        try:return atomic_write(path,value)
+        except PermissionError:
+            if attempt==9:raise
+            time.sleep(min(.05*2**attempt,.5))
 
 def root():
     p = Path(os.environ.get('V13_RUN_DIR', str(v11root().parent / 'watchlist-v1_3-controlled-factor')))

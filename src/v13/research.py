@@ -52,7 +52,9 @@ def run(data, benchmark):
                                  'future_incomplete_label_excluded':int((known&labels.label.isna()).sum()),'account_intents_affected':False})
                 base=labels[known&labels.label.notna()].copy()
                 for factor in FACTORS:
-                    base[factor]=f[factor]
+                    # Empty eligible frames must stay empty: assigning an unaligned
+                    # full Series to an empty DataFrame would recreate excluded dates.
+                    base[factor]=f[factor].reindex(base.index)
             for factor in FACTORS:
                 part=base.dropna(subset=[factor,'label']) if len(base) else pd.DataFrame()
                 desc.append({'symbol':s,'factor':factor,'horizon':h,'events':len(part),
