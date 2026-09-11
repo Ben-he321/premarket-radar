@@ -12,7 +12,7 @@ st.caption('66 个候选完整保留 · 实验候选未证明正期望 · 不接
 r=root()
 st.caption(f'本轮本地持久目录：{r}')
 if st.button('刷新状态'):st.rerun()
-tabs=st.tabs(['V1 旧结果','V1.1 工程重述','实验纸面账户','主现金观察账户','因子覆盖与验收','动量研究'])
+tabs=st.tabs(['V1 旧结果','V1.1 工程重述','实验纸面账户','主现金观察账户','因子覆盖与验收','动量研究','独立条件对照'])
 with tabs[0]:
     st.info('既有已观察结果；本页面不重跑旧研究。')
     p=read(source()/'research'/'portfolio.json')
@@ -49,3 +49,6 @@ with tabs[4]:
 with tabs[5]:
     from src.v12.ui import render
     render()
+with tabs[6]:
+    from src.v13.ui import render as render_v13
+    render_v13()

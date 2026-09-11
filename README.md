@@ -102,3 +102,9 @@ SUPABASE_KEY=你的 Supabase anon/public key
 如果没有配置 Supabase，相关页面会显示中文提示，不会崩溃。当前版本已经接入简化版影子组合自动引擎：打开「影子组合」页时会检查止损/到期卖出，并尝试从板块雷达候选里虚拟买入少量标的。
 
 如果「影子组合」页面出现 `permission denied for table shadow_positions` 或 `shadow_trades`，说明 Supabase 表还没有开放给 `anon` key 访问。请重新打开 Supabase SQL Editor，复制并执行 `supabase_schema.sql` 末尾的“权限修复”SQL 段，它会给 `anon` 和 `authenticated` 角色授予 `shadow_account`、`shadow_positions`、`shadow_trades`、`daily_report` 四张表的读写权限，并创建对应 RLS policy。
+
+## V1.3 独立条件与公平对照
+
+新增独立历史研究模块，保留 66 候选及 V1/V1.1/V1.2 结果。固定 9 个条件/持有周期、3 个无条件对照和每组全部 50 个活动随机种子，不接入现有前向实验账户。
+安装沿用当前 requirements.txt 与虚拟环境；运行、协议和恢复方式见 [docs/V1_3.md](docs/V1_3.md)。页面 `pages/13_V1_1执行.py` 的“独立条件对照”页签只读展示结果。
+报告来自截至 2026-03-10 的真实缓存，属于已观察历史探索；盈利、工程测试通过和策略有效性是不同结论，执行约束失败与未知行动须保留披露。
