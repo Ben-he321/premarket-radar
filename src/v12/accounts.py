@@ -66,6 +66,8 @@ def run():
             if path.exists():results.append(read(path));continue
             ledger,curve=replay(raw,orders,days,actions,fee,friction,metadata)
             trades=pd.DataFrame([trade_components(t,actions) for t in ledger.trades])
+            if trades.empty:trades=pd.DataFrame(columns=['symbol','entry_date','exit_date','qty','price_net_pnl',
+                'dividend_entitlement','total_net_pnl','entry_cost','return_net','friction_usd'])
             curve.to_parquet(out/f'{version}-{case}-equity.parquet',index=False)
             if len(trades):trades.to_parquet(out/f'{version}-{case}-trades.parquet',index=False)
             # CSV is a report of actual model trades, not a market bar library.

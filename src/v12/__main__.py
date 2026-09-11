@@ -15,6 +15,7 @@ def main():
             from .research import conditional
             from .accounts import run
             conditional();run();state('REAL_COMPUTATION_COMPLETE')
+            if not (root()/'COMPUTATION_RECEIPT.json').exists():write(root()/'COMPUTATION_RECEIPT.json',read(root()/'TASK_STATE.json'))
     except Timeout:raise SystemExit('EXISTING_RESEARCH_WORKER_NO_DUPLICATE_STARTED')
     except Exception as exc:
         write(root()/'last_error.json',{'at':utc(),'type':type(exc).__name__,'reason':str(exc)})

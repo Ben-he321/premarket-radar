@@ -14,6 +14,21 @@ def test_labels_enter_next_open_and_mature_inside_calendar():
     d.loc['c','volume']=0
     assert label_frame(d,d,5).label.isna().all()
 
+def test_missing_reference_is_not_zero_excess():
+    d=pd.DataFrame({'open':[100.]*6,'high':[101.]*6,'low':[99.]*6,'close':[100.]*6,'volume':[100.]*6},index=list('abcdef'))
+    f=label_frame(d,pd.DataFrame(),5)
+    assert f.label.iloc[0]==0 and f.spy_label.isna().all() and f.excess_spy.isna().all()
+
+def test_candidate_export_cent_rounding_reconciles():
+    from src.v11.kernel import candidate_event
+    path=pd.DataFrame({'trade_date':['2020-01-02','2020-01-03'],'open':[100.,100.],'high':[101.,101.],
+                       'low':[99.,99.],'close':[100.,100.],'volume':[100000.,100000.]})
+    spec={'id':'fixture','hold':2,'stop':.05,'target':None}
+    a={'2020-01-03':[{'symbol':'X','kind':'dividend','rate':.115,'id':'d','pay_date':None}]}
+    t=candidate_event('X',path,spec,100000,'2020-01-01',actions=a)
+    assert t['price_net_pnl']==-3 and t['dividend_entitlement']==.5750000000000001
+    assert t['total_net_pnl']==-2.43 and t['return_net']==t['total_net_pnl']/t['entry_cost']
+
 def test_no_fake_ci_for_short_history_or_no_reference():
     d=pd.DataFrame({'position':np.arange(10),'label':np.arange(10)/100,'factor':np.arange(10),
                     'bucket':['weak']*5+['strong']*5,'excess_spy':[np.nan]*10})

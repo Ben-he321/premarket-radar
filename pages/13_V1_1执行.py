@@ -12,7 +12,7 @@ st.caption('66 个候选完整保留 · 实验候选未证明正期望 · 不接
 r=root()
 st.caption(f'本轮本地持久目录：{r}')
 if st.button('刷新状态'):st.rerun()
-tabs=st.tabs(['V1 旧结果','V1.1 工程重述','实验纸面账户','主现金观察账户','因子覆盖与验收'])
+tabs=st.tabs(['V1 旧结果','V1.1 工程重述','实验纸面账户','主现金观察账户','因子覆盖与验收','动量研究'])
 with tabs[0]:
     st.info('既有已观察结果；本页面不重跑旧研究。')
     p=read(source()/'research'/'portfolio.json')
@@ -46,3 +46,6 @@ with tabs[4]:
     z=r/'verification_v1_1_bundle.zip'
     if z.exists():st.download_button('下载 V1.1 脱敏验收包',z.read_bytes(),file_name=z.name,mime='application/zip')
     st.caption('页面只读取结果；不会自动运行策略或创建订单。')
+with tabs[5]:
+    from src.v12.ui import render
+    render()
