@@ -12,7 +12,7 @@ st.caption('66 个候选完整保留 · 实验候选未证明正期望 · 不接
 r=root()
 st.caption(f'本轮本地持久目录：{r}')
 if st.button('刷新状态'):st.rerun()
-tabs=st.tabs(['V1 旧结果','V1.1 工程重述','实验纸面账户','主现金观察账户','因子覆盖与验收','动量研究','独立条件对照'])
+tabs=st.tabs(['V1 旧结果','V1.1 工程重述','实验纸面账户','主现金观察账户','因子覆盖与验收','动量研究','独立条件对照','证据修复与前向对照'])
 with tabs[0]:
     st.info('既有已观察结果；本页面不重跑旧研究。')
     p=read(source()/'research'/'portfolio.json')
@@ -52,3 +52,8 @@ with tabs[5]:
 with tabs[6]:
     from src.v13.ui import render as render_v13
     render_v13()
+with tabs[7]:
+    # Only reload the read-only view; the separate execution service is untouched.
+    from importlib import reload
+    from src.v131 import ui as v131_ui
+    reload(v131_ui).render()
