@@ -1,0 +1,2 @@
+# Preserve the exact bytes of frozen evidence/configuration across checkouts.
+* -text whitespace=cr-at-eol

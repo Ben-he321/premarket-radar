@@ -1,0 +1,217 @@
+{
+  "version": "BEN_B1_FROZEN_RESEARCH_20260913",
+  "experiment_id": "BEN_B1_BATCH_001",
+  "source_sha256": "990db28fe44b8306781f195ac716d79332f8130cd0a64cd53d7ab57ed28a360f",
+  "source": "docs/ben_b1/BEN_B1_TASK_20260913.txt",
+  "base_commit": "cfec4746d54c45f7bf31beb7c246709b99c9f6d4",
+  "branch": "codex/ben-b1-research",
+  "universe_sha256": "1718a0165add58ca0095f927596391e96da6ab27553aa6ed3a6ef418f234f17c",
+  "candidate_count": 66,
+  "initial_equity_usd": 5500,
+  "history_start_request": "2016-01-01",
+  "endpoint": "last completed NYSE session at batch freeze; no current session bars",
+  "max_initial_batch_hours": 8,
+  "data_source": "Alpaca",
+  "feed": "sip",
+  "classification": "HISTORICAL_EXPLORATORY_REUSED_DATA",
+  "user_confirmed": {
+    "ema_periods": [
+      5,
+      10,
+      20,
+      50,
+      100
+    ],
+    "after_close_entry": true,
+    "max_close_premium": 0.01,
+    "stop_below_support": 0.01,
+    "max_initial_leg_distance": 0.07,
+    "exclude_direct_oil_gas": [
+      "SM",
+      "BATL"
+    ],
+    "earnings_avoidance_required": true
+  },
+  "research_defaults": {
+    "ema_seed": "SMA first n valid RTH closes, recursive alpha=2/(n+1)",
+    "strict_warmup": 100,
+    "preferred_warmup": 300,
+    "atr": "Wilder14",
+    "entry_minutes_after_close": 5,
+    "expiry_minutes_after_close": 15,
+    "active_exit_minutes_before_close": 10,
+    "max_spread_mid": 0.003,
+    "quote_max_age_seconds": 5,
+    "pressure_emas": [
+      20,
+      50,
+      100
+    ],
+    "prior_high_days": 30,
+    "minimum_net_rr": 2,
+    "support_core": [
+      10,
+      20
+    ],
+    "support_neighbors": [
+      50,
+      100
+    ],
+    "support_neighborhood_close": 0.01,
+    "cluster_max_range_close": 0.005,
+    "two_leg_distance_entry": [
+      0.005,
+      0.03
+    ],
+    "deviation_ema5_pct": 0.06,
+    "deviation_ema10_pct": 0.1,
+    "deviation_atr5": 2,
+    "deviation_atr10": 3,
+    "failure_window_sessions": 5,
+    "failure_delta_pct_min": 0.0025,
+    "failure_delta_pct_max": 0.0075,
+    "failure_delta_atr": 0.25,
+    "reentry_full_sessions": 2,
+    "reentry_touch_atr": 0.5,
+    "reentry_close_ema5_atr": 1,
+    "earnings_blackout_prior_sessions": 3,
+    "earnings_resume": "first full session with NY date strictly after actual release date, close+5min",
+    "cash_interest": 0,
+    "rate_base": 0.08,
+    "rate_stress": 0.12,
+    "interest_day_count": "ACT/360",
+    "initial_margin": 0.5,
+    "maintenance_margin": 0.3,
+    "maintenance_stress": 0.5
+  },
+  "matrix": [
+    {
+      "rule": "B1_FULL",
+      "position": "P50_PRIMARY",
+      "cost": "base",
+      "commission": 1,
+      "friction_bps": 10
+    },
+    {
+      "rule": "B1_FULL",
+      "position": "P50_PRIMARY",
+      "cost": "stress25",
+      "commission": 1,
+      "friction_bps": 25
+    },
+    {
+      "rule": "B1_FULL",
+      "position": "P50_PRIMARY",
+      "cost": "double_commission",
+      "commission": 2,
+      "friction_bps": 10
+    },
+    {
+      "rule": "B1_FULL",
+      "position": "P100_CONCENTRATED",
+      "cost": "base",
+      "commission": 1,
+      "friction_bps": 10
+    },
+    {
+      "rule": "B1_FULL",
+      "position": "P100_CONCENTRATED",
+      "cost": "stress25",
+      "commission": 1,
+      "friction_bps": 25
+    },
+    {
+      "rule": "B1_FULL",
+      "position": "P100_CONCENTRATED",
+      "cost": "double_commission",
+      "commission": 2,
+      "friction_bps": 10
+    },
+    {
+      "rule": "B1_FULL",
+      "position": "P200_MARGIN_RESEARCH",
+      "cost": "base",
+      "commission": 1,
+      "friction_bps": 10
+    },
+    {
+      "rule": "B1_FULL",
+      "position": "P200_MARGIN_RESEARCH",
+      "cost": "stress25",
+      "commission": 1,
+      "friction_bps": 25
+    },
+    {
+      "rule": "B1_FULL",
+      "position": "P200_MARGIN_RESEARCH",
+      "cost": "double_commission",
+      "commission": 2,
+      "friction_bps": 10
+    },
+    {
+      "rule": "B1_NO_DEVIATION",
+      "position": "P50_PRIMARY",
+      "cost": "base",
+      "commission": 1,
+      "friction_bps": 10
+    },
+    {
+      "rule": "B1_NO_DEVIATION",
+      "position": "P50_PRIMARY",
+      "cost": "stress25",
+      "commission": 1,
+      "friction_bps": 25
+    },
+    {
+      "rule": "B1_NO_DEVIATION",
+      "position": "P50_PRIMARY",
+      "cost": "double_commission",
+      "commission": 2,
+      "friction_bps": 10
+    },
+    {
+      "rule": "B1_NO_TWO_FAILURE",
+      "position": "P50_PRIMARY",
+      "cost": "base",
+      "commission": 1,
+      "friction_bps": 10
+    },
+    {
+      "rule": "B1_NO_TWO_FAILURE",
+      "position": "P50_PRIMARY",
+      "cost": "stress25",
+      "commission": 1,
+      "friction_bps": 25
+    },
+    {
+      "rule": "B1_NO_TWO_FAILURE",
+      "position": "P50_PRIMARY",
+      "cost": "double_commission",
+      "commission": 2,
+      "friction_bps": 10
+    }
+  ],
+  "margin_stress": [
+    "12_PERCENT_RATE",
+    "50_PERCENT_MAINTENANCE"
+  ],
+  "fixed_cost_diagnostic_monthly": [
+    0,
+    150
+  ],
+  "new_purchases_allowed": false,
+  "paid_model_calls_allowed": false,
+  "ben_forward_allowed": false,
+  "probe_selection": "cases first; first10 valid coarse first-entry events ordered date then stable local identity hash; no outcome sorting",
+  "data_gates": [
+    "VERIFIED_PIT",
+    "VERIFIED_RTH_100",
+    "SAME_UNIT_ACTIONS",
+    "QUOTE_EXECUTION",
+    "FULL_HELD_PATH"
+  ],
+  "missing_quote_proxy": "MINUTE_BAR_EXECUTION_PROXY, never mixed with executable results",
+  "actual_earnings_only": "RETROSPECTIVE_EARNINGS_EXCLUSION, never mixed with strict PIT",
+  "rules_authority": "full taskbook controls over this machine-readable digest; defaults are not optimized or literature-proven",
+  "frozen_at": "2026-09-13T21:38:42.993222+00:00"
+}
