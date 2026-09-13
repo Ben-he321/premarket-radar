@@ -90,6 +90,8 @@ class Ledger:
         self.events: list = []
         self.stopped_reason: str | None = None
         self.debt_campaign_id: str | None = None
+        self.corporate_actions: dict = {}
+        self.dividend_receivables: dict = {}
 
     @property
     def margin_enabled(self) -> bool:
@@ -128,13 +130,14 @@ class Ledger:
                 pos["last_mark"] = px
             values[symbol] = px * pos["quantity"]
         market_value = sum(values.values())
-        equity = self.cash + self.unsettled_cash + market_value - self.debt - self.accrued_interest
+        dividend_receivable = sum(x["amount"] for x in self.dividend_receivables.values() if x["status"] == "RECEIVABLE")
+        equity = self.cash + self.unsettled_cash + dividend_receivable + market_value - self.debt - self.accrued_interest
         if not missing and equity <= 0:
             self.stopped_reason = "NONPOSITIVE_NET_EQUITY"
         return {
             "mode": self.config.mode, "asof_day": self.asof_day,
             "initial_equity": self.config.initial_equity, "cash": self.cash,
-            "unsettled_cash": self.unsettled_cash, "market_value": money(market_value),
+            "unsettled_cash": self.unsettled_cash, "dividend_receivable": money(dividend_receivable), "market_value": money(market_value),
             "debt": self.debt, "accrued_interest": round(self.accrued_interest, 10),
             "interest_total": round(self.interest_total, 10), "interest_posted": self.interest_posted,
             "net_equity": round(equity, 10), "reserved_exit_fees": self.reserved_exit_fees,
@@ -276,7 +279,7 @@ class Ledger:
         if limit is not None and (not _positive(limit) or exec_price > limit+EPS):
             raise ValueError("FRICTION_WOULD_EXCEED_LIMIT")
         legs = leg_quantities or [quantity]
-        if len(legs) not in (1, 2) or sum(legs) != quantity or any(not isinstance(x, int) or x <= 0 for x in legs):
+        if len(legs) not in (1, 2) or sum(legs) != quantity or any(not isinstance(x, int) or x < 0 for x in legs):
             raise ValueError("INVALID_LEG_QUANTITIES")
         existing_order = self.orders.get(order_id)
         if existing_order and existing_order.get("limit") is not None:
@@ -302,7 +305,7 @@ class Ledger:
             state = self.snapshot(marks)
             if state["missing_current_marks"]:
                 raise ValueError("CURRENT_EQUITY_UNKNOWN")
-            extra_legs = max(0, len(legs)-len(self.positions[symbol]["legs"]))
+            extra_legs = sum(q > 0 and (i >= len(self.positions[symbol]["legs"]) or self.positions[symbol]["legs"][i]["quantity"] == 0) for i, q in enumerate(legs))
             remaining_budget = maximum*exec_price + extra_legs*self.config.commission
             capacity = self._capacity(price, state["net_equity"], state["market_value"], remaining_budget,
                                       0, extra_legs*self.config.commission, displayed_size)
@@ -532,11 +535,118 @@ class Ledger:
         self.events.append({"type": "MARGIN_ACTION", "at": str(at), "status": result["status"], "missing": missing})
         return result
 
+    def apply_split(self, action_id: str, symbol: str, ratio: float, at: object) -> dict:
+        """Change share units without creating cash or rewriting old fill evidence.
+
+        Fractional entitlements are retained as holdings, explicitly awaiting
+        issuer cash-in-lieu evidence; integer-only orders cannot liquidate them.
+        """
+        if not _positive(ratio):
+            raise ValueError("INVALID_SPLIT_RATIO")
+        payload = {"type": "SPLIT", "action_id": action_id, "symbol": symbol,
+                   "ratio": ratio, "at": str(at)}
+        if action_id in self.corporate_actions:
+            if self.corporate_actions[action_id] != payload:
+                raise ValueError("CORPORATE_ACTION_ID_CONFLICT")
+            return copy.deepcopy(payload)
+        if symbol in self.positions:
+            p = self.positions[symbol]
+            p["quantity"] *= ratio
+            p["last_mark"] /= ratio
+            for leg in p["legs"]:
+                leg["quantity"] *= ratio
+                leg["original_quantity"] *= ratio
+            c = self.campaigns[p["campaign_id"]]
+            c["entry_quantity"] *= ratio
+            c["exit_quantity"] *= ratio
+            c["share_unit_note"] = "SPLIT_EQUIVALENT_CAMPAIGN_COUNTS; ORIGINAL_FILL_RECORDS_UNCHANGED"
+        self.corporate_actions[action_id] = payload
+        self.events.append(payload)
+        self.assert_invariants()
+        return copy.deepcopy(payload)
+
+    def dividend_ex(self, action_id: str, symbol: str, amount_per_share: float,
+                    pay_date: object, at: object) -> dict:
+        if not _positive(amount_per_share):
+            raise ValueError("INVALID_DIVIDEND")
+        payload = {"type": "DIVIDEND_EX", "action_id": action_id, "symbol": symbol,
+                   "amount_per_share": amount_per_share, "pay_date": str(pay_date), "at": str(at)}
+        if action_id in self.corporate_actions:
+            if self.corporate_actions[action_id] != payload:
+                raise ValueError("CORPORATE_ACTION_ID_CONFLICT")
+            return copy.deepcopy(self.dividend_receivables[action_id])
+        p = self.positions.get(symbol)
+        quantity = p["quantity"] if p else 0
+        value = {**payload, "entitled_quantity": quantity, "amount": money(quantity*amount_per_share),
+                 "campaign_id": p["campaign_id"] if p else None, "status": "RECEIVABLE"}
+        self.dividend_receivables[action_id] = value
+        self.corporate_actions[action_id] = payload
+        if p:
+            c = self.campaigns[p["campaign_id"]]
+            c["dividends"] = money(c.get("dividends", 0)+value["amount"])
+        self.events.append(copy.deepcopy(value))
+        return copy.deepcopy(value)
+
+    def dividend_pay(self, action_id: str, at: object) -> dict:
+        value = self.dividend_receivables[action_id]
+        if value["status"] == "PAID":
+            return copy.deepcopy(value)
+        if value["pay_date"] in ("UNKNOWN", "None"):
+            raise ValueError("DIVIDEND_PAY_DATE_UNKNOWN")
+        if _day(at) < _day(value["pay_date"]):
+            raise ValueError("DIVIDEND_PAYMENT_BEFORE_PAY_DATE")
+        self.advance_day(at)
+        self._receive_cash(value["amount"])
+        value.update(status="PAID", paid_at=str(at))
+        self.events.append({"type": "DIVIDEND_PAY", "action_id": action_id, "at": str(at), "amount": value["amount"]})
+        return copy.deepcopy(value)
+
+    def cash_in_lieu(self, action_id: str, symbol: str, amount: float, at: object) -> dict:
+        """Settle an issuer-confirmed fractional entitlement, never an assumed price.
+
+        Whole shares remain allocated by largest remainder (near leg wins ties).
+        The supplied confirmed total cash is counted once as corporate proceeds;
+        it is not reported as an exchange order or a natural market fill.
+        """
+        if not isinstance(amount, (int, float)) or not math.isfinite(amount) or amount < 0:
+            raise ValueError("INVALID_CONFIRMED_CASH_IN_LIEU")
+        payload = {"type": "CASH_IN_LIEU", "action_id": action_id, "symbol": symbol,
+                   "amount": money(amount), "at": str(at)}
+        if action_id in self.corporate_actions:
+            if self.corporate_actions[action_id] != payload:
+                raise ValueError("CORPORATE_ACTION_ID_CONFLICT")
+            return copy.deepcopy(payload)
+        pos = self.positions[symbol]
+        whole = math.floor(pos["quantity"]+EPS)
+        fraction = pos["quantity"]-whole
+        if fraction <= EPS:
+            raise ValueError("NO_FRACTIONAL_ENTITLEMENT")
+        allocated = [math.floor(l["quantity"]+EPS) for l in pos["legs"]]
+        extra = whole-sum(allocated)
+        rank = sorted(range(len(allocated)), key=lambda i: (-(pos["legs"][i]["quantity"]-allocated[i]), i))
+        for i in rank[:extra]:
+            allocated[i] += 1
+        for leg, quantity in zip(pos["legs"], allocated):
+            leg["quantity"] = quantity
+        pos["quantity"] = whole
+        c = self.campaigns[pos["campaign_id"]]
+        c["exit_quantity"] += fraction
+        c["exit_proceeds"] = money(c["exit_proceeds"]+amount)
+        c["cash_in_lieu"] = money(c.get("cash_in_lieu", 0)+amount)
+        self._receive_cash(money(amount))
+        if not whole:
+            c.update(status="CLOSED", exit_at=str(at))
+            del self.positions[symbol]
+        self.corporate_actions[action_id] = payload
+        self.events.append({**payload, "fractional_quantity": fraction})
+        self.assert_invariants()
+        return copy.deepcopy(payload)
+
     def campaign_summary(self) -> dict:
         rows = []
         for c in self.campaigns.values():
             complete = c["status"] == "CLOSED"
-            rows.append({**copy.deepcopy(c), "net_profit": money(c["exit_proceeds"]-c["entry_outlay"]-c["interest"]) if complete else None})
+            rows.append({**copy.deepcopy(c), "net_profit": money(c["exit_proceeds"]+c.get("dividends", 0)-c["entry_outlay"]-c["interest"]) if complete else None})
         closed = [x for x in rows if x["status"] == "CLOSED"]
         wins = [x["net_profit"] for x in closed if x["net_profit"] > 0]
         losses = [x["net_profit"] for x in closed if x["net_profit"] < 0]
@@ -570,7 +680,7 @@ class Ledger:
             raise ValueError("LEDGER_VERSION_MISMATCH")
         result = cls(FinanceConfig(**value["config"]))
         allowed = set(vars(result)) - {"config"}
-        if set(value["state"]) != allowed:
+        if not set(value["state"]).issubset(allowed) or (allowed - set(value["state"])) - {"corporate_actions", "dividend_receivables"}:
             raise ValueError("LEDGER_STATE_SCHEMA_MISMATCH")
         for key, item in value["state"].items():
             setattr(result, key, copy.deepcopy(item))
