@@ -179,8 +179,12 @@ def run():
             v['minimum_free_memory_mib']=min(v['minimum_free_memory_mib'],r['free_memory_mib'])
             v['minimum_free_disk_bytes']=min(v['minimum_free_disk_bytes'],r['free_disk_bytes'])
             global_peak=max(global_peak,r['peak_rss_mib'])
+    error_samples=list(ROOT.glob('STOP_RECORD*.json'))+list((ROOT/'attempts').rglob('STOP_RECORD*.json'))
+    for path in error_samples:
+        recorded=read(path).get('process_memory') or {}
+        global_peak=max(global_peak,recorded.get('peak_rss_mib',0))
     write_csv(final/'OBSERVED_PHASE_MEMORY.csv',list(profile.values()))
-    write(final/'RESOURCE_PEAKS.json',{'process_high_water_mib':global_peak,'phase_observations':profile,
+    write(final/'RESOURCE_PEAKS.json',{'maximum_recorded_process_high_water_mib':global_peak,'phase_observations':profile,
         'phase_rss_is_sampled_not_exact_allocation_attribution':True,'sampling':'10 seconds plus logical stage boundaries','deadline':DEADLINE})
     sources={}
     for label,code in [('Q0/A','Q0_P50_A'),('Q1/A','Q1_P50_A'),('Q0/B','Q0_P50_B'),('Q1/B','Q1_P50_B')]:
@@ -190,10 +194,13 @@ def run():
         write_csv(final/(label.replace('/','_')+'_CAMPAIGN_PARTITIONS.csv'),parts)
         tail,tail_parts=analyze(directory,label,quarter=False)
         final_summary=read(directory/'FINAL_ACCOUNT.json') if (directory/'FINAL_ACCOUNT.json').exists() else {}
-        tail['tail_period_processed']=bool(tail['latest_completed_day']==TAIL_END and final_summary.get('actually_executed') and final_summary.get('processed_through')==TAIL_END and final_summary.get('error_count')==0)
+        saved_progress=read(directory/'progress.json')
+        tail['tail_period_processed']=bool(tail['latest_completed_day']==TAIL_END and saved_progress.get('processed_day')==TAIL_END
+            and tail['checkpoint_read_only_verification']['hash_verified'])
+        tail['final_export_attested']=bool(final_summary.get('actually_executed') and final_summary.get('processed_through')==TAIL_END and final_summary.get('error_count')==0)
         tail['tail_valuation_and_calendar_verified']=not tail['valuation_issues'] and tail['calendar_audit']['status']=='PASS'
         tail['tail_restore_verified']=recovery_matches_checkpoint(tail['recovery'],tail['checkpoint_read_only_verification'])
-        tail['tail_complete']=tail['tail_period_processed'] and tail['tail_valuation_and_calendar_verified'] and tail['tail_restore_verified']
+        tail['tail_complete']=tail['tail_period_processed'] and tail['final_export_attested'] and tail['tail_valuation_and_calendar_verified'] and tail['tail_restore_verified']
         tail['all_positions_closed_and_settled']=not tail['positions'] and tail['unsettled_cash']==0
         tail['change_after_quarter_end']={
             'equity':round(tail['latest_completed_close_equity']-row['quarter_end_equity'],2) if row['quarter_complete'] and tail['latest_completed_close_equity'] is not None else None,
@@ -241,7 +248,7 @@ def run():
         '', '四本账户均受原66候选身份、历史量价覆盖及财报证据限制。A层PIT证据不足导致零入场，不能称策略通过；B层使用回顾性的已发布财报排除，不能冒充完整PIT或前向可执行优势。未知财报、身份或历史输入仍UNKNOWN，未取消门槛。覆盖有限的组合与完整指数比较，不是独立盈利证明。',
         '', f"4月尾段／最新已保存账本：截至{tail['latest_completed_day']}，权益{money(tail['latest_completed_close_equity'])}美元、现金{money(tail['cash'])}美元、未结算款{money(tail['unsettled_cash'])}美元、持仓{json.dumps(tail['positions'],ensure_ascii=False)}。尾段完成={tail['tail_complete']}，最终恢复={tail['recovery'].get('status')}，全部持仓已退出且结算={tail['all_positions_closed_and_settled']}。季度末之后的权益变化{money(tail['change_after_quarter_end']['equity'])}美元，新增买入成交{tail['change_after_quarter_end']['buy_fills']}笔、卖出成交{tail['change_after_quarter_end']['sell_fills']}笔；未完成字段保留未知。",
         f"工程证据复核={evidence['status']}；旧检查点恢复={evidence['restore']['status']}；{evidence['dense']['real_events']}条真实事件、{evidence['dense']['block_count']}段状态等价={evidence['dense']['status']}；真实中断与重复幂等={evidence['crash']['status']}；真实报价分批输入等价={evidence['normalization']['status']}。{evidence['regression_cases']}项回归及{evidence['repeated_final_guard_cases']}项最终重复复验读取实际冻结证据，重复复验不另算独立用例。私有完整备份与逐文件核对记录另附。",
-        f'实际续跑进程累计内存峰值{global_peak:.2f}MiB。各读取、排序、事件积累、归档和恢复阶段的观测值另见OBSERVED_PHASE_MEMORY.csv；阶段采样值不冒充精确的内存分配点。',
+        f'心跳及错误记录中的进程内存峰值最高为{global_peak:.2f}MiB。各读取、排序、事件积累、归档和恢复阶段的观测值另见OBSERVED_PHASE_MEMORY.csv；阶段采样值不冒充精确的内存分配点。',
         '', '另外三本完成账户直接复用，原M20/U服务及账本不重启、不改动。仅原共享API限流元数据继续用于共同配额，不涉及其交易逻辑。代码分支codex/ben-b1-2-resume-streaming，草稿PR #32，不合并main。']
     if stop:text += ['',f"本轮停止原因：{stop['type']} / {stop['reason']}，时间{stop['at']}。原轮次的停止原因和未完成状态没有改写。"]
     elif last_error:text += ['',f"本轮早先尝试在{last_error['at']}发生{last_error['type']}，其错误、源码、状态和恢复证据保存在attempts目录；该错误不是当前尝试的停止状态。"]
