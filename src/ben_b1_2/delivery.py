@@ -12,6 +12,7 @@ import subprocess
 import tomllib
 import zipfile
 import pandas as pd
+import pandas_market_calendars as mcal
 from .runtime import ROOT, REPO, OLD_REPO, B11, B1, START, END, TAIL_END, read, write, sha, utc
 from .sample_diagnostics import build as sample_comparison
 
@@ -48,6 +49,9 @@ def verified_partial(path, account):
         raise ValueError('PARTIAL_SOURCE_NOT_ATTESTED')
     if manifest.get('events_run')!=0 or manifest.get('full_interval_completed') is not False:
         raise ValueError('PARTIAL_MUST_NOT_CLAIM_COMPLETION')
+    if (manifest.get('recovery_validation')!='NOT_PERFORMED' or manifest.get('engine_restored') is not False
+            or manifest.get('sqlite_full_chain_verified') is not False):
+        raise ValueError('PARTIAL_MUST_NOT_CLAIM_RECOVERY')
     if manifest.get('synthetic_fixture') is not False or manifest.get('saved_config',{}).get('run_id')!=account.name:
         raise ValueError('PARTIAL_REAL_ACCOUNT_ID_REQUIRED')
     files=manifest.get('files',[])
@@ -64,8 +68,13 @@ def audit_account(path, partial_path=None):
     quarter=existing(path/'QUARTER_END_ACCOUNT.json',{})
     progress=existing(path/'progress.json',{})
     values=existing(path/'CLOSE_VALUATIONS.json',[])
-    selected=[r for r in values if START<=r['trade_date']<=END]
-    equity=[numeric(r.get('net_equity')) for r in selected]
+    last_valuation=dict(max(values,key=lambda v:v['trade_date'])) if values else None
+    if last_valuation and (last_valuation.get('valuation_status')!='CURRENT_MARKS' or last_valuation.get('missing_current_marks')):
+        last_valuation['net_equity']=None;last_valuation['market_value']=None
+    selected=sorted((r for r in values if START<=r['trade_date']<=END),key=lambda r:r['trade_date'])
+    expected_dates=[str(d.date()) for d in mcal.get_calendar('NYSE').schedule(START,END).index]
+    calendar_complete=[r['trade_date'] for r in selected]==expected_dates
+    equity=[numeric(r.get('net_equity')) if r.get('valuation_status')=='CURRENT_MARKS' and not r.get('missing_current_marks') else None for r in selected]
     peak=5500;dd=[]
     for e in equity:
         if e is None:continue
@@ -103,7 +112,8 @@ def audit_account(path, partial_path=None):
          'quarter_unsettled_cash':q.get('unsettled_cash'),'quarter_dividend_receivable':q.get('dividend_receivable'),
          'quarter_market_value':q.get('market_value'),'quarter_debt':q.get('debt'),'quarter_interest':q.get('interest_total'),
          'quarter_close_rows':len(selected),'quarter_missing_mark_days':sum(e is None for e in equity),
-         'quarter_max_drawdown':min(dd) if len(equity)==61 and all(e is not None for e in equity) else None,
+         'quarter_calendar_complete':calendar_complete,
+         'quarter_max_drawdown':min(dd) if calendar_complete and all(e is not None for e in equity) else None,
          'buy_intents':quarter.get('buy_intents'),'buy_fills':quarter.get('buy_fills'),'sell_fills':quarter.get('sell_fills'),
          'traded_symbols':symbols,'trading_activity':activity,'fills_table_status':fills_status,
          'commission_paid_through_quarter':sum(c.get('commission',0) for c in campaigns) if quarter else None,
@@ -112,7 +122,8 @@ def audit_account(path, partial_path=None):
          'tail_positions':sorted(final.get('open_positions',{})),'tail_pending_exits':final.get('pending_exit_count'),
          'error_count':final.get('error_count'),'recovery':recovery,
          'one_shared_initial_5500':final.get('portfolio_not_stitched',False),'path':str(path),
-         'partial_evidence':partial['manifest'] if partial else None,'partial_evidence_path':partial['path'] if partial else None}
+         'partial_evidence':partial['manifest'] if partial else None,'partial_evidence_path':partial['path'] if partial else None,
+         'latest_saved_close_valuation':last_valuation}
     return row
 
 def preservation_check():
@@ -188,6 +199,12 @@ def report(sample_version,portfolio_version):
             p=r['partial_evidence'];bounds=p['saved_boundaries']
             f=pd.read_csv(Path(r['partial_evidence_path'])/'fills.csv')
             lines.append(f'| {account_label(r["account"])} | {bounds["checkpoint_event_cutoff_at"]} | {bounds["latest_completed_trading_session_ny"]} | {usd(p["saved_interim_cash_not_terminal_result"])} | {int(f.side.eq("BUY").sum())}/{int(f.side.eq("SELL").sum())} | {p["recovery_validation"]} |')
+        lines+=['','现金不等于账户权益。下面单独列最近已保存的日终估值及其同一时点组成；它可能早于检查点时间，不与更新后的现金混算，也不是季度成绩。缺少当日有效价格时，权益和持仓市值保持未知。','',
+          '| 账户 | 已保存估值的纽约交易日 | 当日权益 | 当日现金 | 退出费预留 | 持仓市值 | 未结算 | 分红应收 | 负债 |',
+          '|---|---|---:|---:|---:|---:|---:|---:|---:|']
+        for r in partials:
+            v=r['latest_saved_close_valuation'] or {}
+            lines.append(f'| {account_label(r["account"])} | {v.get("trade_date","未知")} | {usd(v.get("net_equity"))} | {usd(v.get("cash"))} | {usd(v.get("reserved_exit_fees"))} | {usd(v.get("market_value"))} | {usd(v.get("unsettled_cash"))} | {usd(v.get("dividend_receivable"))} | {usd(v.get("debt"))} |')
     lines+=['','## 同期SPY/QQQ参照','',
       '同为5500美元，首个交易日RTH开盘模型买入，整数股、每实际订单1美元佣金及0.1%摩擦，现金零息。实际付款后下一交易日尝试一次整数股再投资；期末未付款分红列应收。raw账户与all复权总回报参考分开，基金净值已含管理费，不重复扣除；未计税费。','',
       '| 基准 | 状态 | 期末权益 | 净盈亏 | 期末现金 | 期末股数 | 分红应收 |','|---|---|---:|---:|---:|---:|---:|']
@@ -202,6 +219,7 @@ def report(sample_version,portfolio_version):
       f'真实输入质量检查覆盖{quality["checked_objects"]}个对象、{quality["rows"]:,}行：重复{quality["duplicates"]}、无效OHLC {quality["invalid_ohlc"]}、缺失成交量{quality["missing_volume"]}。空响应、分钟无成交、停牌与接口失败不互相替代。',
       '排序成交量仅在原已核对竞价量的日期可用；未知不填零，价差完全并列又缺二级排序量时按原内核保留未知。NOW预热期5:1拆股在12/18生效边界换算旧历史单位，未来公司行动不提前作用。',
       '旧历史网络接收时间为UNKNOWN；当前抓取时间和计划保守可得边界单独保存。历史收盘后1分钟定稿只是模型假设，Basic当前实时可得性未验证；历史L1不是排队或真实成交证明。','',
+      '报价数量按当前冻结实现直接使用股数、倍率为1。Alpaca专门变更公告确认自2025-11-03起使用该口径，支持本轮2026年1—4月数据；没有乘100或按证券价格再乘整手数量。通用页面的旧描述冲突及更早历史归一化未知，详见 engineering/QUOTE_SIZE_UNIT_SOURCE_REVIEW.md。','',
       '## 工程检查、保留和恢复','',
       f'初版完整L1记录触及本机16GB内存边界，因此保留初版并增加纯存储归档与流式导出。MRVL优化前后真实事件等价检查状态：{equality}。准确事件ID/摘要、重复处理和异常中断恢复的测试与失败修复记录见engineering；未获PASS时不得声称真实经济状态等价。',
       f'四本账户完成：{reconciliation["common_accounts_complete"]}；四本恢复校验全通过：{reconciliation["all_account_recovery_pass"]}。旧文件检查：{preserve["status"]}（{preserve["checked_files"]}项）。',
@@ -211,6 +229,10 @@ def report(sample_version,portfolio_version):
       '本轮交付应区分：有真实模型成交的工程回放；全部条件不满足而零成交；数据未知导致无法评价；以及因错误/预算未完成的账户。具体状态和错误不以空表或初始化现金代替。',
       ('固定20样本的报价时窗对照已全部完成。' if compare['all40_completed'] else '固定20样本的报价时窗对照尚未全部完成，不对未完成样本下结论。')+'更多交易不自动意味着更好。共同资金结果仍受财报、范围版本、收盘及竞价量、历史行情可得性等限制，因此不能确认策略具有独立优势，也不能仅凭当前覆盖受限样本断言没有优势。',
       '下一步最少是补齐可靠的历史计划版本、已知初步财务公告链、缺失证券日期及相应交易时点输入；Finnhub如需使用先由Ben配置现有凭证并验证权限，而非购买服务。当前Basic实时执行条件仍不满足验证要求。P100、P200、其余消融和Ben前向均保留待后续，本轮不扩参或自动晋级。']
+    closure=existing(ROOT/'EXECUTION_CLOSURE.json',{})
+    if closure:
+        lines+=['','## 本轮执行收尾','',closure.get('chinese_summary','收尾事实详见 EXECUTION_CLOSURE.json。'),
+                '本轮8小时资源上限不自动延长。完整本地恢复存储继续保留；验收包不是数据库备份。']
     if errors:lines+=['','实际运行错误（完整恢复点保留）：']+[f'- {e["error"].get("account")}: {e["error"].get("reason")}' for e in errors]
     (ROOT/'BEN_B1_2_RESULTS.md').write_text('\n'.join(lines)+'\n',encoding='utf-8')
     return reconciliation
@@ -223,7 +245,7 @@ def package(sample_version,portfolio_version):
     root_names={'BEN_B1_2_RESULTS.md','ACCOUNT_COMPARISON.json','ACCOUNT_COMPARISON.csv','REPORT_RECONCILIATION.json','P50_ACTIVITY_BY_SYMBOL.csv',
         'B12_PROTOCOL.json','TASK_STATE.json','STAGE_LOG.jsonl','PRESERVATION_BEFORE.json','PRESERVATION_CHECK.json',
         'Q0_REUSE_VERIFICATION.json','INPUT_CAPABILITY.json','INPUT_CAPABILITY_EARNINGS.json','ALL66_INPUT_COVERAGE.csv','PARTIAL_EXPORTS.json',
-        'ALL66_DAILY_INPUT_QUALIFICATION.csv','ENVIRONMENT_CHECK.json','DELIVERY_CODE.json','SOURCE_MANIFEST.json','RESUME.md','RULE_DIFFERENCES.md','RESOURCE_BUDGET.md'}
+        'ALL66_DAILY_INPUT_QUALIFICATION.csv','ENVIRONMENT_CHECK.json','DELIVERY_CODE.json','SOURCE_MANIFEST.json','RESUME.md','RULE_DIFFERENCES.md','RESOURCE_BUDGET.md','EXECUTION_CLOSURE.json'}
     for name in root_names:add(ROOT/name)
     engineering_names={'ENGINE_INTEGRATION.json','ENGINE_INTEGRATION.md','B12_ENGINE_INTEGRATION.json','BENCHMARK_IMPLEMENTATION_CHECK.json',
         'CHECKOUT_LINE_ENDING_RESTORATION.json','Q0_REUSE_FIRST_CHECK_LINE_ENDINGS.json','MRVL_INPUT_PRESERVATION_BEFORE_COMPACT.json',
@@ -233,6 +255,9 @@ def package(sample_version,portfolio_version):
         'ACQUISITION_PREFLIGHT_BEFORE.json','ACQUISITION_PREFLIGHT_VALIDATION.json','ACQUISITION_REVIEW.json',
         'validate_completed_accounts.py','DELIVERY_VALIDATION_SAMPLES38.json','DELIVERY_VALIDATION_SAMPLES40.json','DELIVERY_VALIDATION_A_STAGE.json',
         'DELIVERY_VALIDATION_Q0_B_STAGE.json','validate_Q0_B_stage.py','PORTFOLIO_RESOURCE_OBSERVATION_20260914T112140Z.json',
+        'PORTFOLIO_MONITOR.json','PORTFOLIO_MONITOR.jsonl','PORTFOLIO_MONITOR_WRITE_REPAIR.json',
+        'QUOTE_SIZE_UNIT_SOURCE_REVIEW.json','QUOTE_SIZE_UNIT_SOURCE_REVIEW.md',
+        'DELIVERY_INTERIM_REPORT_REVIEW.json','DELIVERY_INTERIM_REPORT_REVIEW.md',
         'extract_partial_checkpoint.py','PARTIAL_EXTRACTOR.md','PARTIAL_EXTRACTOR_TESTS.json',
         'PARTIAL_EXTRACTOR_TESTS_BEFORE_PORTABILITY.json','SOURCE_MANIFEST_BEFORE_REPORT_HELPER.json',
         'SAMPLE_RESOURCE_OBSERVATION_20260914T093853Z.json','FEED_CACHE_REVIEW.json',
@@ -244,7 +269,7 @@ def package(sample_version,portfolio_version):
         'final_regression_before_delivery_fixture_review','acquisition_prefilter','pre_acquisition_final_regression',
         'acquisition_equivalence','acquisition_before_shorter_tmp_name','delivery_validation','delivery_validation_samples38',
         'partial_extractor','partial_extractor_before_portability','feed_cache_regression','sample_diagnostics_regression',
-        'delivery_validation_samples40','benchmarks_real_run','delivery_activity_regression','delivery_validation_A_stage','delivery_partial_regression','delivery_validation_Q0_B_stage']:
+        'delivery_validation_samples40','benchmarks_real_run','delivery_activity_regression','delivery_validation_A_stage','delivery_partial_regression','delivery_validation_Q0_B_stage','delivery_interim_valuation_regression','delivery_unknown_boundary_regression']:
         engineering_names.update({stem+'.log',stem+'.xml'})
     zones={'engineering':engineering_names,
        'quality':{'HISTORICAL_QUERY_MAPPING.csv','INPUT_HASHES.json','MARKET_OBJECT_QUALITY.csv','NOW_SPLIT_UNIT_REVIEW.json','QUALITY_SUMMARY.json'},

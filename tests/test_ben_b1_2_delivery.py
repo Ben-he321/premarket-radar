@@ -94,7 +94,8 @@ def partial_fixture(root, account):
     manifest={'status':'PARTIAL_CHECKPOINT_EVIDENCE_NOT_COMPLETED','source_checkpoint':str(account/'checkpoint.json'),
         'checkpoint_wrapper_hash_verified':True,'source_unchanged_during_extraction':True,'events_run':0,
         'full_interval_completed':False,'synthetic_fixture':False,'saved_config':{'run_id':account.name},
-        'saved_interim_cash_not_terminal_result':4200,'files':[]}
+        'saved_interim_cash_not_terminal_result':4200,'files':[],
+        'recovery_validation':'NOT_PERFORMED','engine_restored':False,'sqlite_full_chain_verified':False}
     # Handwritten packaging mock; synthetic_fixture=False only exercises the
     # real-evidence attestation gate. No research checkpoint or prices are read.
     for name in delivery.PARTIAL_TABLE_NAMES:
@@ -149,6 +150,51 @@ def test_nonexistent_fixed_account_is_not_run_and_cash_not_invented(tmp_path):
     row=delivery.audit_account(tmp_path/'NEVER_STARTED')
     assert row['status']=='NOT_RUN' and row['processed_through'] is None
     assert row['quarter_cash'] is None and row['quarter_end_equity'] is None
+
+
+def test_interim_close_is_dated_separately_and_stale_marks_never_become_quarter_nav(tmp_path):
+    put(tmp_path/'CLOSE_VALUATIONS.json',[
+        {'trade_date':'2026-01-06','cash':25,'market_value':5550,'net_equity':5575,
+         'valuation_status':'STALE_MARK_UNKNOWN','missing_current_marks':['MOCK']},
+        {'trade_date':'2026-01-05','cash':12,'market_value':5400,'net_equity':5412,
+         'valuation_status':'CURRENT_MARKS','missing_current_marks':[]}])
+    row=delivery.audit_account(tmp_path)
+    latest=row['latest_saved_close_valuation']
+    assert latest['trade_date']=='2026-01-06' and latest['cash']==25
+    assert latest['net_equity'] is None and latest['market_value'] is None
+    assert row['quarter_end_equity'] is None and row['quarter_max_drawdown'] is None
+    assert json.loads((tmp_path/'CLOSE_VALUATIONS.json').read_text())[0]['net_equity']==5575
+
+
+@pytest.mark.parametrize('defect',['stale','duplicate','missing','unsorted'])
+def test_quarter_drawdown_requires_unique_complete_calendar_and_current_prices(tmp_path,defect):
+    dates=[str(d.date()) for d in delivery.mcal.get_calendar('NYSE').schedule(delivery.START,delivery.END).index]
+    rows=[{'trade_date':d,'net_equity':5500-i,'valuation_status':'CURRENT_MARKS','missing_current_marks':[]} for i,d in enumerate(dates)]
+    if defect=='stale':rows[5]['valuation_status']='STALE_MARK_UNKNOWN'
+    elif defect=='duplicate':rows[5]=dict(rows[4])
+    elif defect=='missing':rows.pop(5)
+    else:rows.reverse()
+    put(tmp_path/'CLOSE_VALUATIONS.json',rows)
+    before=(tmp_path/'CLOSE_VALUATIONS.json').read_bytes()
+    result=delivery.audit_account(tmp_path)
+    assert result['quarter_missing_mark_days']==(1 if defect=='stale' else 0)
+    assert result['quarter_calendar_complete']==(defect in ['stale','unsorted'])
+    if defect=='unsorted':assert result['quarter_max_drawdown']==pytest.approx(5440/5500-1)
+    else:assert result['quarter_max_drawdown'] is None
+    assert (tmp_path/'CLOSE_VALUATIONS.json').read_bytes()==before
+
+
+@pytest.mark.parametrize('defect',['claims_pass','claims_restore','claims_chain','missing_attestation'])
+def test_partial_cannot_claim_database_restore_or_recovery(isolated_delivery,defect):
+    account=isolated_delivery/'portfolio/base_v1/B12_Q0_P50_B_base_v1'
+    path,manifest=partial_fixture(isolated_delivery,account)
+    if defect=='claims_pass':manifest['recovery_validation']='PASS'
+    elif defect=='claims_restore':manifest['engine_restored']=True
+    elif defect=='claims_chain':manifest['sqlite_full_chain_verified']=True
+    else:manifest.pop('recovery_validation')
+    put(path/'PARTIAL_EVIDENCE.json',manifest)
+    with pytest.raises(ValueError,match='PARTIAL_MUST_NOT_CLAIM_RECOVERY'):
+        delivery.audit_account(account,path)
 
 
 def test_partial_or_failed_final_file_is_not_completed_account(tmp_path):
