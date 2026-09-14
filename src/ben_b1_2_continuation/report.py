@@ -153,10 +153,10 @@ def recovery_matches_checkpoint(recovery,proof):
                 and recovery.get('synthetic') is False and recovery.get('before')==recovery.get('after')==digest)
 
 def engineering_evidence():
-    gate=read(ROOT/'ENGINEERING_GATE.json');checked=[]
+    gate=read(active_gate_path());checked=[]
     for name,expected in gate['files'].items():
         p=Path(name);checked.append({'path':name,'hash_matches':p.is_file() and sha(p)==expected})
-    result={'gate_status':gate['status'],'gate_at':gate['at'],'files':checked,
+    result={'gate_path':str(active_gate_path()),'gate_status':gate['status'],'gate_at':gate['at'],'files':checked,
         'regression_cases':gate.get('tests_passed'),'repeated_final_guard_cases':gate.get('final_guard_cases_passed')}
     for key,name in [('restore','REAL_PREFIX_RESTORE.json'),('dense','DENSE_REAL_EQUIVALENCE.json'),
                      ('crash','REAL_DENSE_CRASH_RECOVERY.json'),('normalization','REAL_DENSE_INPUT_EQUIVALENCE_v2.json')]:
@@ -227,7 +227,8 @@ def run():
         'quarter_to_tail_equity_change':r['change_after_quarter_end']['equity'],'new_buys_in_tail':r['change_after_quarter_end']['buy_fills'],
         'new_sells_in_tail':r['change_after_quarter_end']['sell_fills'],'recovery':r['recovery'].get('status')} for r in tails])
     q=rows[-1];tail=tails[-1];complete=q['quarter_complete'] and tail['tail_complete'] and evidence['status']=='PASS'
-    latest=read(ACCOUNT/'progress.json');stop=read(ROOT/'STOP_RECORD.json') if (ROOT/'STOP_RECORD.json').exists() else None
+    latest=read(ACCOUNT/'progress.json');last_error=read(ROOT/'STOP_RECORD.json') if (ROOT/'STOP_RECORD.json').exists() else None
+    stop=last_error if last_error and last_error['at']>=state.get('started_at','') else None
     outcome='完整季度与4月尾段已完成并恢复PASS。' if complete else ('Q1/B完整季度已核对；4月尾段或最终工程验收尚未全部完成，二者分别列示。' if q['quarter_complete'] else '本轮未完成可验收的完整季度，不能给出Q1/B完整季度成绩。')
     text=['# B1.2 Q1/B续作结果','',outcome,'',
         f"原账户保持不变。本轮最后完成日期：{latest['processed_day']}。原2026-01-22的6607.69美元仍是中途快照，未覆盖成最终成绩。",'',
@@ -243,6 +244,7 @@ def run():
         f'实际续跑进程累计内存峰值{global_peak:.2f}MiB。各读取、排序、事件积累、归档和恢复阶段的观测值另见OBSERVED_PHASE_MEMORY.csv；阶段采样值不冒充精确的内存分配点。',
         '', '另外三本完成账户直接复用，原M20/U服务及账本不重启、不改动。仅原共享API限流元数据继续用于共同配额，不涉及其交易逻辑。代码分支codex/ben-b1-2-resume-streaming，草稿PR #32，不合并main。']
     if stop:text += ['',f"本轮停止原因：{stop['type']} / {stop['reason']}，时间{stop['at']}。原轮次的停止原因和未完成状态没有改写。"]
+    elif last_error:text += ['',f"本轮早先尝试在{last_error['at']}发生{last_error['type']}，其错误、源码、状态和恢复证据保存在attempts目录；该错误不是当前尝试的停止状态。"]
     text += ['',f"恢复入口：{REPO}，模块src.ben_b1_2_continuation.runner；读取本轮ENGINEERING_GATE和同一私有检查点，拒绝从头初始化。授权硬截止{DEADLINE}；截止后需新一轮明确授权。",
         '', '验证包不包含密钥、原始行情、Parquet、完整检查点、SQLite、WAL、SHM或私有全量备份。完整私有恢复副本仍留在本地。']
     (final/'BEN_B1_2_CONTINUATION_RESULTS.md').write_text('\n'.join(text)+'\n',encoding='utf-8')

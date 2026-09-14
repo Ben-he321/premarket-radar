@@ -86,6 +86,7 @@ def test_report_rejects_tampered_wrapper_without_engine_restore(tmp_path,monkeyp
 
 def test_final_inputs_rehash_bytes_even_when_size_unchanged(tmp_path,monkeypatch):
     monkeypatch.setattr(package,'ROOT',tmp_path);monkeypatch.setattr(package,'ACCOUNT',tmp_path/'account')
+    monkeypatch.setattr(package,'active_gate_path',lambda:tmp_path/'ENGINEERING_GATE.json')
     f=tmp_path/'input.txt';f.write_text('real')
     package.write(package.ACCOUNT/'DYNAMIC_INPUT_HASHES.json',{str(f):package.sha(f)})
     package.write(tmp_path/'ENGINEERING_GATE.json',{'files':{}})

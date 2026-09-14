@@ -12,7 +12,7 @@ ACCOUNT_FILES=['RUN_SPEC.json','progress.json','COMMON_CLOCK.json','QUOTE_COVERA
 def recheck_inputs_and_execution():
     results=[]
     sources={'DYNAMIC_INPUT_HASHES':read(ACCOUNT/'DYNAMIC_INPUT_HASHES.json'),
-             'ENGINEERING_GATE':read(ROOT/'ENGINEERING_GATE.json')['files']}
+             'ENGINEERING_GATE':read(active_gate_path())['files']}
     for group,files in sources.items():
         for name,expected in files.items():
             p=Path(name);actual=sha(p) if p.is_file() else None
@@ -78,11 +78,18 @@ def run():
     for name in ('BEN_B1_2_RESULTS.md','B12_PROTOCOL.json'):
         add(OLD/name,'existing/original_B1_2/'+name)
     for p in (REPO/'src/ben_b1_2_continuation').glob('*.py'):add(p,'code/src/ben_b1_2_continuation/'+p.name)
-    for name in read(ROOT/'ENGINEERING_GATE.json')['files']:
+    for name in read(active_gate_path())['files']:
         p=Path(name)
         if p.is_relative_to(REPO) and p.suffix=='.py':add(p,'code/'+str(p.relative_to(REPO)).replace('\\','/'))
-    for p in (REPO/'docs/BEN_B1_2_CONTINUATION.md',REPO/'tests/test_ben_b1_2_continuation.py',REPO/'tests/test_ben_b1_2_continuation_report.py'):
+    for p in (REPO/'docs/BEN_B1_2_CONTINUATION.md',REPO/'tests/test_ben_b1_2_continuation.py',REPO/'tests/test_ben_b1_2_continuation_report.py',REPO/'tests/test_ben_b1_2_continuation_io.py'):
         add(p,'code/'+str(p.relative_to(REPO)).replace('\\','/'))
+    for p in ROOT.glob('ENGINEERING_GATE_revision_*.json'):add(p,'continuation/'+p.name)
+    for pattern in ('STOP_RECORD_*.json','RUNNER_EXIT_*.json'):
+        for p in ROOT.glob(pattern):add(p,'continuation/'+p.name)
+    add(ROOT/'ACTIVE_ENGINEERING_GATE.json','continuation/ACTIVE_ENGINEERING_GATE.json',required=False)
+    for p in (ROOT/'attempts').rglob('*'):
+        if p.is_file() and p.suffix in ('.json','.jsonl','.log','.py') and 'checkpoint' not in p.name.lower():
+            add(p,'attempts/'+str(p.relative_to(ROOT/'attempts')).replace('\\','/'))
     dest=ROOT/'verification_ben_b1_2_window_portfolio_bundle.zip'
     if dest.exists():raise ValueError('NEW_ROUND_BUNDLE_ALREADY_EXISTS_NO_SILENT_OVERWRITE')
     index={'at':utc(),'status':'COMPLETE_WHITELIST' if not missing else 'PACKAGE_INCOMPLETE','entries':manifest,'missing_required':missing,'old_bundle_preserved_at':str(OLD/dest.name),

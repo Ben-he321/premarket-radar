@@ -32,7 +32,7 @@ def heartbeat(progress):
     print(json.dumps(row),flush=True)
 
 def check_gate():
-    gate=read(ROOT/'ENGINEERING_GATE.json')
+    gate=read(active_gate_path())
     if gate['status']!='PASS':raise ValueError('ENGINEERING_GATE_NOT_PASS')
     for path,expected in gate['files'].items():
         if sha(path)!=expected:raise ValueError('ENGINEERING_GATE_SOURCE_OR_PROOF_CHANGED:'+path)
@@ -70,7 +70,7 @@ def resume():
     write(ROOT/'CONTINUATION_RUN_SPEC.json',{'at':utc(),'old_run_spec_sha256':sha(SOURCE_ACCOUNT/'RUN_SPEC.json'),
         'same_account_run_id':RUN_ID,'same_config':True,'same_universe':True,'original_starting_capital_not_reinitialized':True,
         'only_relocation':'Private copied archive path','original_snapshot_6607_69_not_final':True,
-        'original_round_results_unmodified':True,'gate':str(ROOT/'ENGINEERING_GATE.json'),'deadline':DEADLINE})
+        'original_round_results_unmodified':True,'gate':str(active_gate_path()),'deadline':DEADLINE})
     extra=inputs.corporate_events()+inputs.earnings_events(tier)
     by_day={}
     for e in extra:by_day.setdefault(str(pd.Timestamp(e['at']).tz_convert(NY).date()),[]).append(e)
@@ -197,20 +197,39 @@ def main():
     try:msvcrt.locking(lock.fileno(),msvcrt.LK_NBLCK,1)
     except OSError:
         lock.close();raise RuntimeError('CONTINUATION_RUNNER_ALREADY_ACTIVE_NO_DUPLICATE_START')
-    write(ROOT/'RUNNER_PROCESS.json',{'pid':os.getpid(),'started_at':utc(),'repo':str(REPO),'account':str(ACCOUNT),'status':'RUNNING'})
-    status('CONTINUATION_START',research_running=True,persistent_research_worker_running=True,actual_runner_pid=os.getpid())
+    started_at=utc()
+    failed=False
+    def diagnostic(operation,label):
+        try:return operation()
+        except Exception as diagnostic_error:
+            print(json.dumps({'at':utc(),'diagnostic_failure':label,'type':type(diagnostic_error).__name__,'reason':str(diagnostic_error)}),flush=True)
     try:
+        write(ROOT/'RUNNER_PROCESS.json',{'pid':os.getpid(),'started_at':started_at,'repo':str(REPO),'account':str(ACCOUNT),'status':'RUNNING'})
+        status('CONTINUATION_START',research_running=True,persistent_research_worker_running=True,actual_runner_pid=os.getpid(),error_type=None,reason=None)
         result=resume()
         status('FULL_QUARTER_AND_TAIL_COMPLETE',research_running=False,persistent_research_worker_running=False,result=result)
     except Exception as exc:
+        failed=True
         error={'at':utc(),'status':'STOPPED_EVIDENCE_RETAINED','type':type(exc).__name__,'reason':str(exc),
             'traceback':traceback.format_exc(),'no_from_scratch_retry':True,'checkpoint':str(ACCOUNT/'checkpoint.json'),
-            'resources':resources(),'process_memory':process_memory()}
-        write(ROOT/'STOP_RECORD.json',error)
-        status('STOPPED_EVIDENCE_RETAINED',research_running=False,persistent_research_worker_running=False,error_type=type(exc).__name__,reason=str(exc))
+            'resources':diagnostic(resources,'ERROR_RESOURCE_SNAPSHOT'),'process_memory':diagnostic(process_memory,'ERROR_PROCESS_SNAPSHOT')}
+        print(json.dumps({'primary_error':error}),flush=True)
+        diagnostic(lambda:write(ROOT/('STOP_RECORD_'+started_at.replace(':','').replace('+','_')+'_'+str(os.getpid())+'.json'),error),'VERSIONED_STOP_RECORD')
+        diagnostic(lambda:write(ROOT/'STOP_RECORD.json',error),'LATEST_STOP_RECORD')
+        diagnostic(lambda:status('STOPPED_EVIDENCE_RETAINED',research_running=False,persistent_research_worker_running=False,error_type=type(exc).__name__,reason=str(exc)),'STOP_STATUS')
         raise
     finally:
-        if _engine is not None:_engine.close()
-        write(ROOT/'RUNNER_PROCESS.json',{'pid':os.getpid(),'finished_at':utc(),'repo':str(REPO),'account':str(ACCOUNT),'status':'STOPPED'})
-        lock.seek(0);msvcrt.locking(lock.fileno(),msvcrt.LK_UNLCK,1);lock.close()
+        try:
+            if _engine is not None:
+                if failed:diagnostic(_engine.close,'ARCHIVE_CLOSE_AFTER_PRIMARY_ERROR')
+                else:_engine.close()
+        finally:
+            stopped={'pid':os.getpid(),'started_at':started_at,'finished_at':utc(),'repo':str(REPO),'account':str(ACCOUNT),'status':'STOPPED'}
+            try:
+                diagnostic(lambda:write(ROOT/('RUNNER_EXIT_'+str(os.getpid())+'_'+started_at.replace(':','').replace('+','_')+'.json'),stopped),'VERSIONED_PROCESS_EXIT')
+                diagnostic(lambda:write(ROOT/'RUNNER_PROCESS.json',stopped),'LATEST_PROCESS_EXIT')
+            finally:
+                lock.seek(0)
+                try:msvcrt.locking(lock.fileno(),msvcrt.LK_UNLCK,1)
+                finally:lock.close()
 if __name__=='__main__':main()
