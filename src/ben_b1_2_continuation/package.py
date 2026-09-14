@@ -9,6 +9,28 @@ ACCOUNT_FILES=['RUN_SPEC.json','progress.json','COMMON_CLOCK.json','QUOTE_COVERA
     'FINAL_ACCOUNT.json','RECOVERY_IDEMPOTENCY.json','ARCHIVE_MANIFEST.json','summary.json',
     'orders.csv','fills.csv','campaigns.csv','account_events.csv','data_gaps.csv','daily_equity.csv','continuous_close_equity.csv','event_trace.csv']
 
+def recheck_sealed_storage_source(proof_path,output):
+    proof=read(proof_path);source=Path(proof['source']);files=proof['files'];rows=[]
+    if proof['status']!='PASS' or source.resolve()==ROOT.resolve():raise ValueError('INVALID_STORAGE_SOURCE_PROOF')
+    expected_paths={r['relative_path'] for r in files}
+    actual_paths={p.relative_to(source).as_posix() for p in source.rglob('*') if p.is_file()}
+    for row in files:
+        p=source/row['relative_path'];expected=row['after'];actual=None
+        if p.is_file():
+            before=p.stat();digest=sha(p);after=p.stat()
+            actual={'bytes':after.st_size,'mtime_ns':after.st_mtime_ns,'sha256':digest}
+            stable=(before.st_size,before.st_mtime_ns)==(after.st_size,after.st_mtime_ns)
+        else:stable=False
+        rows.append({'relative_path':row['relative_path'],'expected':expected,'actual':actual,
+                     'unchanged':stable and actual==expected})
+    result={'at':utc(),'status':'PASS' if actual_paths==expected_paths and all(r['unchanged'] for r in rows) else 'FAIL',
+            'source':str(source),'source_proof_sha256':sha(proof_path),'full_file_rehash':True,
+            'source_database_opened':False,'checked_files':len(rows),'file_set_unchanged':actual_paths==expected_paths,
+            'missing_files':sorted(expected_paths-actual_paths),'extra_files':sorted(actual_paths-expected_paths),'files':rows}
+    write(output,result)
+    if result['status']!='PASS':raise ValueError('SEALED_C_STORAGE_SOURCE_CHANGED')
+    return result
+
 def recheck_inputs_and_execution():
     results=[]
     sources={'DYNAMIC_INPUT_HASHES':read(ACCOUNT/'DYNAMIC_INPUT_HASHES.json'),
@@ -28,6 +50,8 @@ def run():
     if not (ROOT/'final/ACTUAL_COMPLETION.json').exists():raise ValueError('FINAL_RECONCILIATION_REQUIRED')
     completion=read(ROOT/'final/ACTUAL_COMPLETION.json')
     recheck_inputs_and_execution()
+    if (ROOT/'STORAGE_MIGRATION_COPY.json').exists():
+        recheck_sealed_storage_source(ROOT/'STORAGE_MIGRATION_COPY.json',ROOT/'final/STORAGE_COPY_SOURCE_PRESERVATION_FINAL.json')
     manifest={};missing=[];protected=[]
     before=read(ROOT/'ORIGINAL_ACCOUNT_BEFORE.json')
     for relative,expected in before.items():
@@ -89,8 +113,11 @@ def run():
     add(ROOT/'ACTIVE_ENGINEERING_GATE.json','continuation/ACTIVE_ENGINEERING_GATE.json',required=False)
     for pattern in ('STORAGE_MIGRATION*.json','PLANNED_STORAGE*.json','RUNNER_PROCESS_before_storage_stop.json','TASK_STATE_before_storage_stop.json'):
         for p in ROOT.glob(pattern):add(p,'continuation/'+p.name)
+    for name in ('STORAGE_WAIT_BOUNDARY_20260914T1846Z.json','migration_watch.log','continuation_runner_02.log','continuation_runner_03.log'):
+        add(ROOT/name,'continuation/'+name)
     for p in (REPO/'tests').glob('test_ben_b1_2_storage_*.py'):add(p,'code/tests/'+p.name)
     add(REPO/'tests/test_ben_b1_2_report_support.py','code/tests/test_ben_b1_2_report_support.py')
+    add(REPO/'tests/test_ben_b1_2_package_preservation.py','code/tests/test_ben_b1_2_package_preservation.py')
     add(REPO/'scripts/run_b12_continuation.py','code/scripts/run_b12_continuation.py')
     for p in (ROOT/'engineering/storage_revision3').rglob('*.json'):
         if 'checkpoint' not in p.name.lower() and p.name in ('BLOCK_PROOFS.json','ENGINEERING_RUN.json','DENSE_REAL_EQUIVALENCE.json','REAL_DENSE_CRASH_RECOVERY.json'):

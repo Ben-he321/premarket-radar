@@ -153,6 +153,21 @@ def recovery_matches_checkpoint(recovery,proof):
     return bool(digest and (proof or {}).get('hash_verified') and recovery.get('status')=='PASS'
                 and recovery.get('synthetic') is False and recovery.get('before')==recovery.get('after')==digest)
 
+def migration_restore_matches_expected(restored,expected,expected_sha256):
+    return bool(expected.get('status')=='PASS_ONLY_PATH_RELOCATED_PENDING_FULL_RESTORE'
+        and expected.get('only_archive_path_changed') is True and expected.get('events_executed')==0
+        and expected.get('same_start')==STARTED_AT and expected.get('same_deadline')==DEADLINE
+        and expected.get('expected_payload_hashes') and expected.get('expected_state_hashes')
+        and restored.get('status')=='PASS' and restored.get('expected_proof_sha256')==expected_sha256
+        and restored.get('payload_hashes')==expected['expected_payload_hashes']
+        and restored.get('state_hashes')==expected['expected_state_hashes']
+        and restored.get('all_archive_hashes_verified_by_actual_restore') is True
+        and restored.get('cash_positions_costs_stop_legs_orders_reserves_settlements_consumed_quotes_preserved') is True
+        and restored.get('events_executed_before_verification')==0
+        and restored.get('same_run_id')==RUN_ID and restored.get('same_deadline')==DEADLINE
+        and restored.get('completed_day')==expected.get('completed_day')
+        and restored.get('cash')==expected.get('cash'))
+
 def engineering_evidence():
     gate=read(active_gate_path());checked=[]
     for name,expected in gate['files'].items():
@@ -166,7 +181,9 @@ def engineering_evidence():
     if (ROOT/'engineering/STORAGE_MIGRATION_EXPECTED.json').exists():
         p=ROOT/'engineering/STORAGE_MIGRATION_RESTORE.json'
         result['storage_migration_restore']=read(p) if p.exists() else {'status':'NOT_VERIFIED'}
-        if result['storage_migration_restore'].get('status')!='PASS':result['status']='FAIL'
+        expected_path=ROOT/'engineering/STORAGE_MIGRATION_EXPECTED.json'
+        result['storage_migration_proof_binding']=migration_restore_matches_expected(result['storage_migration_restore'],read(expected_path),sha(expected_path))
+        if not result['storage_migration_proof_binding']:result['status']='FAIL'
         for key,name in [('storage_dense','STORAGE_DENSE_REAL_EQUIVALENCE.json'),('storage_crash','STORAGE_REAL_CRASH_RECOVERY.json')]:
             p=ROOT/'engineering'/name;result[key]=read(p) if p.exists() else {'status':'NOT_VERIFIED'}
             if result[key]['status']!='PASS':result['status']='FAIL'
@@ -268,7 +285,7 @@ def run():
     elif last_error:text += ['',f"本轮早先尝试在{last_error['at']}发生{last_error['type']}，其错误、源码、状态和恢复证据保存在attempts目录；该错误不是当前尝试的停止状态。"]
     if 'storage_migration_restore' in evidence:
         text += ['',f"存储迁移：本轮C盘完整静止副本244个文件、13324049727字节保留，D盘只重定位检查点归档路径。第二次尝试在18:50:19 UTC按已记录的30分钟等待边界计划停机，Jan23没有提交，不改写为资源故障。新版本55项回归、590924真实事件逐块等价及179253事件中断重放均PASS；D盘实际全量迁移恢复={evidence['storage_migration_restore']['status']}。它们与前述早期工程案例有重叠，不相加冒充独立用例数。"]
-    text += ['',f"恢复入口：{REPO}，模块src.ben_b1_2_continuation.runner；读取本轮ENGINEERING_GATE和同一私有检查点，拒绝从头初始化。授权硬截止{DEADLINE}；截止后需新一轮明确授权。",
+    text += ['',f"恢复入口：{REPO/'scripts/run_b12_continuation.py'}，使用既有ai-m1虚拟环境。该入口仅为进程设置D盘TEMP/TMP，再读取本轮ENGINEERING_GATE和同一私有检查点，拒绝从头初始化。授权硬截止{DEADLINE}；截止后需新一轮明确授权。",
         '', '验证包不包含密钥、原始行情、Parquet、完整检查点、SQLite、WAL、SHM或私有全量备份。完整私有恢复副本仍留在本地。']
     (final/'BEN_B1_2_CONTINUATION_RESULTS.md').write_text('\n'.join(text)+'\n',encoding='utf-8')
     write(final/'ACTUAL_COMPLETION.json',{'at':utc(),'full_quarter_and_tail_complete':complete,'quarter_complete':q['quarter_complete'],'tail_complete':tail['tail_complete'],
