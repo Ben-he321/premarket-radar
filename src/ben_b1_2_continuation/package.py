@@ -9,9 +9,25 @@ ACCOUNT_FILES=['RUN_SPEC.json','progress.json','COMMON_CLOCK.json','QUOTE_COVERA
     'FINAL_ACCOUNT.json','RECOVERY_IDEMPOTENCY.json','ARCHIVE_MANIFEST.json','summary.json',
     'orders.csv','fills.csv','campaigns.csv','account_events.csv','data_gaps.csv','daily_equity.csv','continuous_close_equity.csv','event_trace.csv']
 
+def recheck_inputs_and_execution():
+    results=[]
+    sources={'DYNAMIC_INPUT_HASHES':read(ACCOUNT/'DYNAMIC_INPUT_HASHES.json'),
+             'ENGINEERING_GATE':read(ROOT/'ENGINEERING_GATE.json')['files']}
+    for group,files in sources.items():
+        for name,expected in files.items():
+            p=Path(name);actual=sha(p) if p.is_file() else None
+            results.append({'group':group,'path':name,'expected_sha256':expected,'actual_sha256':actual,'matches':actual==expected})
+    proof={'at':utc(),'status':'PASS' if all(r['matches'] for r in results) else 'FAIL','full_file_rehash':True,
+           'no_size_mtime_only_shortcut':True,'checked_files':len(results),'files':results}
+    write(ROOT/'final/FINAL_INPUT_HASH_RECHECK.json',proof)
+    if proof['status']!='PASS':raise ValueError('FINAL_INPUT_OR_EXECUTION_HASH_MISMATCH')
+    return proof
+
 def run():
     if read(ROOT/'RUNNER_PROCESS.json')['status']!='STOPPED':raise ValueError('NO_PACKAGE_WHILE_WRITER_ACTIVE')
     if not (ROOT/'final/ACTUAL_COMPLETION.json').exists():raise ValueError('FINAL_RECONCILIATION_REQUIRED')
+    completion=read(ROOT/'final/ACTUAL_COMPLETION.json')
+    recheck_inputs_and_execution()
     manifest={};missing=[];protected=[]
     before=read(ROOT/'ORIGINAL_ACCOUNT_BEFORE.json')
     for relative,expected in before.items():
@@ -48,7 +64,12 @@ def run():
             add(ROOT/'engineering'/mode/name,'engineering/'+mode+'/'+name,required=name!='first10000_real_quotes_profile.txt')
     for label,code in [('Q0_A','Q0_P50_A'),('Q1_A','Q1_P50_A'),('Q0_B','Q0_P50_B'),('Q1_B','Q1_P50_B')]:
         path=ACCOUNT if label=='Q1_B' else OLD/'portfolio/compact_base_v1'/('B12_'+code+'_compact_base_v1')
-        for name in ACCOUNT_FILES:add(path/name,'accounts/'+label+'/'+name,required=False)
+        result=next(r for r in completion['accounts'] if r['account']==label.replace('_','/'))
+        tail=next(r for r in completion['tails'] if r['account']==label.replace('_','/'))
+        required={'RUN_SPEC.json','progress.json','COMMON_CLOCK.json','QUOTE_COVERAGE.json','CLOSE_VALUATIONS.json','DYNAMIC_INPUT_HASHES.json'}
+        if result['quarter_complete']:required.update(('QUARTER_END_ACCOUNT.json','QUARTER_END_LEDGER.json','QUARTER_END_CLOSE_VALUATION.json'))
+        if tail['tail_complete']:required.update(('FINAL_ACCOUNT.json','RECOVERY_IDEMPOTENCY.json','fills.csv','campaigns.csv','orders.csv'))
+        for name in ACCOUNT_FILES:add(path/name,'accounts/'+label+'/'+name,required=name in required)
     for name in ['BENCHMARKS.md','RUN_SPEC.json','SUMMARY.json','INPUT_MANIFEST.json','RTH_OPEN_VERIFICATION.json','COMPLETE.json']:
         add(OLD/'benchmarks/frozen_v1'/name,'existing/benchmarks/'+name)
     for symbol in ('SPY','QQQ'):
@@ -57,11 +78,14 @@ def run():
     for name in ('BEN_B1_2_RESULTS.md','B12_PROTOCOL.json'):
         add(OLD/name,'existing/original_B1_2/'+name)
     for p in (REPO/'src/ben_b1_2_continuation').glob('*.py'):add(p,'code/src/ben_b1_2_continuation/'+p.name)
-    for p in (REPO/'docs/BEN_B1_2_CONTINUATION.md',REPO/'tests/test_ben_b1_2_continuation.py'):
+    for name in read(ROOT/'ENGINEERING_GATE.json')['files']:
+        p=Path(name)
+        if p.is_relative_to(REPO) and p.suffix=='.py':add(p,'code/'+str(p.relative_to(REPO)).replace('\\','/'))
+    for p in (REPO/'docs/BEN_B1_2_CONTINUATION.md',REPO/'tests/test_ben_b1_2_continuation.py',REPO/'tests/test_ben_b1_2_continuation_report.py'):
         add(p,'code/'+str(p.relative_to(REPO)).replace('\\','/'))
     dest=ROOT/'verification_ben_b1_2_window_portfolio_bundle.zip'
     if dest.exists():raise ValueError('NEW_ROUND_BUNDLE_ALREADY_EXISTS_NO_SILENT_OVERWRITE')
-    index={'at':utc(),'entries':manifest,'missing_required':missing,'old_bundle_preserved_at':str(OLD/dest.name),
+    index={'at':utc(),'status':'COMPLETE_WHITELIST' if not missing else 'PACKAGE_INCOMPLETE','entries':manifest,'missing_required':missing,'old_bundle_preserved_at':str(OLD/dest.name),
         'excluded':['all market Parquet and raw pages','complete checkpoints','SQLite/WAL/SHM','private full recovery backup','credentials'],
         'private_initial_backup':str(ROOT/'private_backup/full_inactive_recovery.zip')}
     write(ROOT/'PUBLIC_BUNDLE_MANIFEST.json',index)
@@ -74,9 +98,9 @@ def run():
         for name,item in manifest.items():
             with z.open(name) as f:actual=hashlib.file_digest(f,'sha256').hexdigest()
             if actual!=item['sha256']:raise ValueError('ZIP_CONTENT_HASH_FAILED:'+name)
-    delivery={'at':utc(),'zip':str(dest),'bytes':dest.stat().st_size,'sha256':sha(dest),'entries':len(manifest)+1,
+    delivery={'at':utc(),'package_status':index['status'],'zip':str(dest),'bytes':dest.stat().st_size,'sha256':sha(dest),'entries':len(manifest)+1,
         'all_whitelisted_contents_hash_verified':True,'missing_required':missing,'original_account_preservation':'PASS',
-        'full_quarter_and_tail_complete':read(ROOT/'final/ACTUAL_COMPLETION.json')['full_quarter_and_tail_complete']}
+        'full_quarter_and_tail_complete':completion['full_quarter_and_tail_complete'],'complete_delivery':not missing and completion['full_quarter_and_tail_complete']}
     write(ROOT/'DELIVERY.json',delivery);print(delivery,flush=True)
 
 if __name__=='__main__':run()
