@@ -14,6 +14,7 @@ from src.ben_b1.ledger import Ledger
 from src.ben_b1_2.compact import stream_hash
 from .runtime import *
 from .report_support import coverage_summary,verified_benchmarks
+from .query_check import proof_matches_expected
 
 START='2026-01-02'
 END='2026-03-31'
@@ -187,6 +188,15 @@ def engineering_evidence():
         for key,name in [('storage_dense','STORAGE_DENSE_REAL_EQUIVALENCE.json'),('storage_crash','STORAGE_REAL_CRASH_RECOVERY.json')]:
             p=ROOT/'engineering'/name;result[key]=read(p) if p.exists() else {'status':'NOT_VERIFIED'}
             if result[key]['status']!='PASS':result['status']='FAIL'
+    if (ROOT/'engineering/QUERY_FIX_RESTORE_EXPECTED.json').exists():
+        expected_path=ROOT/'engineering/QUERY_FIX_RESTORE_EXPECTED.json';expected=read(expected_path)
+        p=ROOT/'engineering/QUERY_FIX_ACTUAL_PREFIX_RESTORE.json';actual=read(p) if p.exists() else {'status':'NOT_VERIFIED'}
+        result['query_fix_prefix_restore']=actual
+        result['query_fix_proof_binding']=proof_matches_expected(actual,expected,sha(expected_path))
+        if not result['query_fix_proof_binding']:result['status']='FAIL'
+        for key,name in [('query_dense','QUERY_DENSE_REAL_EQUIVALENCE.json'),('query_crash','QUERY_REAL_DENSE_CRASH_RECOVERY.json')]:
+            p=ROOT/'engineering'/name;result[key]=read(p) if p.exists() else {'status':'NOT_VERIFIED'}
+            if result[key]['status']!='PASS':result['status']='FAIL'
     return result
 
 def run():
@@ -285,6 +295,9 @@ def run():
     elif last_error:text += ['',f"本轮早先尝试在{last_error['at']}发生{last_error['type']}，其错误、源码、状态和恢复证据保存在attempts目录；该错误不是当前尝试的停止状态。"]
     if 'storage_migration_restore' in evidence:
         text += ['',f"存储迁移：本轮C盘完整静止副本244个文件、13324049727字节保留，D盘只重定位检查点归档路径。第二次尝试在18:50:19 UTC按已记录的30分钟等待边界计划停机，Jan23没有提交，不改写为资源故障。新版本55项回归、590924真实事件逐块等价及179253事件中断重放均PASS；D盘实际全量迁移恢复={evidence['storage_migration_restore']['status']}。它们与前述早期工程案例有重叠，不相加冒充独立用例数。"]
+    if 'query_fix_prefix_restore' in evidence:
+        query_stop=read(ROOT/'PLANNED_QUERY_FIX_STOP.json');query_backup=read(ROOT/'engineering/QUERY_FIX_FULL_BACKUP.json')
+        text += ['',f"归档查询续修：第三次尝试已保存至{query_stop['actual_committed_day']}，于{query_stop['stopped_at']}计划停下；当时没有资源错误，Jan26未提交。完整同账户恢复副本{query_backup['file_count']}文件、{query_backup['bytes']}字节逐文件核对PASS。实际库查询计划显示原冲突检查扫描全部旧归档，现仅固定新批次为外层，保留相同ID、digest及代际冲突判断；84项工程回归、固定真实密集样本及中断重放分别保存，非新增策略实验。保存前缀实际全量恢复={evidence['query_fix_prefix_restore']['status']}，证明内容关联={evidence['query_fix_proof_binding']}。"]
     text += ['',f"恢复入口：{REPO/'scripts/run_b12_continuation.py'}，使用既有ai-m1虚拟环境。该入口仅为进程设置D盘TEMP/TMP，再读取本轮ENGINEERING_GATE和同一私有检查点，拒绝从头初始化。授权硬截止{DEADLINE}；截止后需新一轮明确授权。",
         '', '验证包不包含密钥、原始行情、Parquet、完整检查点、SQLite、WAL、SHM或私有全量备份。完整私有恢复副本仍留在本地。']
     (final/'BEN_B1_2_CONTINUATION_RESULTS.md').write_text('\n'.join(text)+'\n',encoding='utf-8')

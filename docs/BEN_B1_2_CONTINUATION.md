@@ -55,3 +55,9 @@ TEMP归档暂存改为WITHOUT ROWID并限制32MiB缓存，归档INSERT保持按I
 `ENGINEERING_GATE_revision_3.json`绑定新实现、复制/重定位证明及真实等价/中断证据。启动时必须执行D盘归档全量恢复和迁移状态核对，现金、持仓、成本、止损腿、订单、预留、未结算款、已消费报价和最后事件全部一致后才处理新日期。首次实际PASS记录不覆盖；后续恢复必须保留已认领的迁移前缀。旧缓存内C盘路径作为只读来源保留，不全局改写；不另建独立API配额。
 
 额外报告核对包括：按证券/日期/用途去重的覆盖摘要，区分完整空响应、财报未知未请求、失败和未保存日期；SPY/QQQ按symbol识别并核对61交易日、本金、状态及原完成清单22项哈希。报价数量不能代替独立覆盖样本。未实现新的Bloom或其他查询缓存，不以不确定收益扩大本轮工程范围。
+
+第四版仅修正两条归档冲突查询的外层扫描方向。第三次尝试已实际保存Jan23并推进日历至Jan25，计划停机记录另存`PLANNED_QUERY_FIX_STOP.json`，Jan26未提交。13文件、11454357417字节的同账户完整副本位于`private_backup/query_fix_revision3_full_account`，复制包含所有现有SQLite相关文件，源前后和副本SHA、大小及mtime一致；之前C盘整轮副本不变。
+
+实际归档库的只读EXPLAIN证实原JOIN以整个旧archived表为外层，连一个新日历事件也会全表扫描。仅使用CROSS JOIN固定新stage为外层；相同ID、digest、代际冲突和未来未认领代判断、插入事务、哈希及事件顺序完全保留。84项工程回归包含已认领过去代、未认领未来代、重复、内容冲突，以及恢复证明缺失、内容变化和锚点未认领的拒绝。真实等价仍使用固定MRVL590924事件9段及179253事件中断重放，输出在`engineering/query_revision4`，不再计算其他三本季度账户。
+
+`ENGINEERING_GATE_revision_4.json`只有在这些固定检查通过后才能冻结。后续进程必须先完整验证当前已保存Jan25归档，并逐组件匹配`QUERY_FIX_RESTORE_EXPECTED.json`，实际PASS记录写入`QUERY_FIX_ACTUAL_PREFIX_RESTORE.json`，再执行Jan26新日期。首次PASS不覆盖，未来恢复要求已认领同一保存前缀。原授权起止时间保持不变。

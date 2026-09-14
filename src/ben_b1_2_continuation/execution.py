@@ -155,9 +155,11 @@ class BoundedReplayEngine(StreamingSharedEngine):
         prior=db.execute('SELECT block_hash FROM archive_blocks WHERE sequence=?',(sequence,)).fetchone()
         if prior is not None and prior[0]!=block_hash:raise ValueError('ARCHIVE_CHECKPOINT_REPLAY_DIVERGENCE')
         with db:
-            bad=db.execute('SELECT 1 FROM stage_events s JOIN archived_events a USING(event_id) WHERE s.digest!=a.digest OR a.block_sequence!=? LIMIT 1',(sequence,)).fetchone()
+            # Fix the outer loop to this new block. With no ANALYZE statistics,
+            # SQLite otherwise scans every old archived row even for one event.
+            bad=db.execute('SELECT 1 FROM stage_events s CROSS JOIN archived_events a USING(event_id) WHERE s.digest!=a.digest OR a.block_sequence!=? LIMIT 1',(sequence,)).fetchone()
             if bad:raise ValueError('ARCHIVED_EVENT_DIGEST_OR_GENERATION_CONFLICT')
-            bad=db.execute('SELECT 1 FROM stage_quotes s JOIN archived_quotes a USING(inventory_id) WHERE s.digest!=a.digest OR a.block_sequence!=? LIMIT 1',(sequence,)).fetchone()
+            bad=db.execute('SELECT 1 FROM stage_quotes s CROSS JOIN archived_quotes a USING(inventory_id) WHERE s.digest!=a.digest OR a.block_sequence!=? LIMIT 1',(sequence,)).fetchone()
             if bad:raise ValueError('ARCHIVED_QUOTE_DIGEST_OR_GENERATION_CONFLICT')
             db.execute('INSERT OR IGNORE INTO archived_events SELECT event_id,digest,? FROM stage_events ORDER BY event_id COLLATE BINARY',(sequence,))
             db.execute('INSERT OR IGNORE INTO archived_quotes SELECT inventory_id,payload,digest,? FROM stage_quotes ORDER BY inventory_id COLLATE BINARY',(sequence,))

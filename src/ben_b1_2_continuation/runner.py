@@ -18,6 +18,7 @@ from .inputs import StreamingInputs,StreamingMarket
 from .execution import BoundedReplayEngine as ReplayEngine,EventSpool
 from .restore_check import process_memory
 from .migration import verify_migrated_engine
+from .query_check import verify_restart
 NY='America/New_York'
 deadline=guard
 _engine=None
@@ -64,6 +65,7 @@ def resume():
         if json.loads(json.dumps(engine._payload()['config']))!=oldspec['config']:raise ValueError('ORIGINAL_RUN_CONFIG_CHANGED')
     if engine.universe!=inputs.universe:raise ValueError('ORIGINAL_ALL66_UNIVERSE_CHANGED')
     verify_migrated_engine(engine,ROOT)
+    verify_restart(engine,ROOT)
     if engine.state.get('b12_completed_day',{}).get('day','')<'2026-01-22':raise ValueError('ORIGINAL_PREFIX_MISSING')
     if engine.state['b12_completed_day']['day']=='2026-01-22':
         migration_proof=ROOT/'engineering/STORAGE_MIGRATION_EXPECTED.json'
