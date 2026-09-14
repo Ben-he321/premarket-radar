@@ -27,7 +27,33 @@ def usd(x):return '未知／未完成' if numeric(x) is None else f'{float(x):,.
 
 def pct(x):return '未知／未完成' if numeric(x) is None else f'{float(x)*100:.2f}%'
 
-def audit_account(path):
+PARTIAL_TABLE_NAMES={'orders','ledger_orders','fills','campaigns','account_events','decisions','daily_equity',
+                     'positions','settlements','dividend_receivables','errors','data_gaps'}
+
+
+def verified_partial(path, account):
+    """Read an explicitly indexed saved export, without restoring an engine."""
+    if path is None:return None
+    path=Path(path).resolve();account=Path(account).resolve()
+    if not path.is_relative_to((ROOT/'partial_evidence').resolve()):raise ValueError('PARTIAL_PATH_OUTSIDE_EVIDENCE_ROOT')
+    manifest=read(path/'PARTIAL_EVIDENCE.json')
+    if manifest.get('status')!='PARTIAL_CHECKPOINT_EVIDENCE_NOT_COMPLETED':raise ValueError('PARTIAL_STATUS_NOT_ATTESTED')
+    if Path(manifest.get('source_checkpoint','')).resolve()!=account/'checkpoint.json':raise ValueError('PARTIAL_WRONG_ACCOUNT')
+    if not manifest.get('checkpoint_wrapper_hash_verified') or not manifest.get('source_unchanged_during_extraction'):
+        raise ValueError('PARTIAL_SOURCE_NOT_ATTESTED')
+    if manifest.get('events_run')!=0 or manifest.get('full_interval_completed') is not False:
+        raise ValueError('PARTIAL_MUST_NOT_CLAIM_COMPLETION')
+    if manifest.get('synthetic_fixture') is not False or manifest.get('saved_config',{}).get('run_id')!=account.name:
+        raise ValueError('PARTIAL_REAL_ACCOUNT_ID_REQUIRED')
+    files=manifest.get('files',[])
+    if {r['file'] for r in files}!={n+'.csv' for n in PARTIAL_TABLE_NAMES} or len(files)!=len(PARTIAL_TABLE_NAMES):
+        raise ValueError('PARTIAL_EXACT_TABLE_SET_REQUIRED')
+    for record in files:
+        if sha(path/record['file'])!=record['sha256']:raise ValueError('PARTIAL_EXPORTED_FILE_HASH_MISMATCH')
+    return {'path':str(path),'manifest':manifest}
+
+
+def audit_account(path, partial_path=None):
     path=Path(path);final=existing(path/'FINAL_ACCOUNT.json',{})
     q=existing(path/'QUARTER_END_CLOSE_VALUATION.json',{})
     quarter=existing(path/'QUARTER_END_ACCOUNT.json',{})
@@ -40,7 +66,8 @@ def audit_account(path):
         if e is None:continue
         peak=max(peak,e);dd.append(e/peak-1)
     campaigns=quarter.get('campaigns',{}).get('campaigns',[])
-    fills_path=path/'fills.csv'
+    partial=verified_partial(partial_path,path)
+    fills_path=Path(partial['path'])/'fills.csv' if partial and not final else path/'fills.csv'
     fills_status='MISSING'
     try:
         fills=pd.read_csv(fills_path) if fills_path.is_file() else pd.DataFrame()
@@ -49,14 +76,22 @@ def audit_account(path):
         fills=pd.DataFrame();fills_status='EMPTY_FILE_NO_SCHEMA'
     if len(fills):
         field='at' if 'at' in fills else 'fill_effective_at'
-        fills=fills[pd.to_datetime(fills[field],utc=True).dt.tz_convert('America/New_York').dt.strftime('%Y-%m-%d')<=END]
+        fills=fills.assign(_trade_date=pd.to_datetime(fills[field],utc=True).dt.tz_convert('America/New_York').dt.strftime('%Y-%m-%d'))
+        fills=fills[fills._trade_date.between(START,END)]
     symbols=sorted(fills.symbol.unique()) if len(fills) else []
+    activity=[]
+    for symbol in symbols:
+        group=fills[fills.symbol.eq(symbol)]
+        buys=group[group.side.eq('BUY')];sells=group[group.side.eq('SELL')]
+        activity.append({'symbol':symbol,'buy_dates':sorted(buys._trade_date.unique()),'sell_dates':sorted(sells._trade_date.unique()),
+                         'buy_shares':int(buys.quantity.sum()),'sell_shares':int(sells.quantity.sum())})
     end=numeric(q.get('net_equity')) if not q.get('missing_current_marks') and q.get('valuation_status')=='CURRENT_MARKS' else None
     latest=final.get('latest_equity') or {}
     tail_known=not latest.get('missing_current_marks') and latest.get('valuation_status')=='CURRENT_MARKS'
     recovery=existing(path/'RECOVERY_IDEMPOTENCY.json',{}).get('status','NOT_VERIFIED')
     completed=bool(final.get('actually_executed') and final.get('processed_through')==TAIL_END and final.get('error_count')==0 and fills_status=='READ_OK' and recovery=='PASS')
-    row={'account':path.name,'actually_completed':completed,'status':final.get('status','NOT_COMPLETED'),
+    pending_status='PARTIAL_CHECKPOINT_EVIDENCE_NOT_COMPLETED' if partial else ('INCOMPLETE_ACCOUNT' if path.exists() else 'NOT_RUN')
+    row={'account':path.name,'actually_completed':completed,'status':final.get('status',pending_status),
          'coverage_status':final.get('coverage_status','COVERAGE_LIMITED'),'processed_through':final.get('processed_through',progress.get('processed_day')),
          'initial_capital':5500,'quarter_end_equity':end,'quarter_profit':end-5500 if end is not None else None,
          'quarter_return':end/5500-1 if end is not None else None,'quarter_cash':q.get('cash'),'quarter_reserved_exit_fees':q.get('reserved_exit_fees'),
@@ -65,13 +100,14 @@ def audit_account(path):
          'quarter_close_rows':len(selected),'quarter_missing_mark_days':sum(e is None for e in equity),
          'quarter_max_drawdown':min(dd) if len(equity)==61 and all(e is not None for e in equity) else None,
          'buy_intents':quarter.get('buy_intents'),'buy_fills':quarter.get('buy_fills'),'sell_fills':quarter.get('sell_fills'),
-         'traded_symbols':symbols,'fills_table_status':fills_status,
+         'traded_symbols':symbols,'trading_activity':activity,'fills_table_status':fills_status,
          'commission_paid_through_quarter':sum(c.get('commission',0) for c in campaigns) if quarter else None,
          'friction_paid_through_quarter':sum(c.get('friction',0) for c in campaigns) if quarter else None,
          'tail_cash':latest.get('cash'),'tail_equity':latest.get('net_equity') if tail_known else None,
          'tail_positions':sorted(final.get('open_positions',{})),'tail_pending_exits':final.get('pending_exit_count'),
          'error_count':final.get('error_count'),'recovery':recovery,
-         'one_shared_initial_5500':final.get('portfolio_not_stitched',False),'path':str(path)}
+         'one_shared_initial_5500':final.get('portfolio_not_stitched',False),'path':str(path),
+         'partial_evidence':partial['manifest'] if partial else None,'partial_evidence_path':partial['path'] if partial else None}
     return row
 
 def preservation_check():
@@ -86,8 +122,9 @@ def preservation_check():
 def report(sample_version,portfolio_version):
     compare=sample_comparison(sample_version)
     root=ROOT/'portfolio'/portfolio_version
-    paths=sorted(p for p in root.glob('B12_*') if p.is_dir()) if root.exists() else []
-    accounts=[audit_account(p) for p in paths]
+    paths=[root/f'B12_{mode}_P50_{tier}_{portfolio_version}' for tier in ['A','B'] for mode in ['Q0','Q1']]
+    partial_index=existing(ROOT/'PARTIAL_EXPORTS.json',{}).get('accounts',{})
+    accounts=[audit_account(p,partial_index.get(p.name)) for p in paths]
     errors=[{'path':str(p),'error':read(p)} for p in root.glob('*_ERROR.json')] if root.exists() else []
     benchmarks=existing(ROOT/'benchmarks/frozen_v1/SUMMARY.json',[])
     for account in accounts:
@@ -99,9 +136,12 @@ def report(sample_version,portfolio_version):
     equality=existing(ROOT/'engineering/MRVL_REAL_ECONOMIC_EQUIVALENCE.json',{}).get('status','NOT_VERIFIED')
     write(ROOT/'ACCOUNT_COMPARISON.json',accounts)
     pd.DataFrame([{k:json.dumps(v) if isinstance(v,(list,dict)) else v for k,v in r.items()} for r in accounts]).to_csv(ROOT/'ACCOUNT_COMPARISON.csv',index=False,encoding='utf-8-sig')
+    activity=[{'account':a['account'],**r} for a in accounts for r in a['trading_activity']]
+    pd.DataFrame([{k:json.dumps(v) if isinstance(v,list) else v for k,v in r.items()} for r in activity],
+                 columns=['account','symbol','buy_dates','sell_dates','buy_shares','sell_shares']).to_csv(ROOT/'P50_ACTIVITY_BY_SYMBOL.csv',index=False,encoding='utf-8-sig')
     reconciliation={'at':utc(),'fixed_original20_complete':compare['all40_completed'],
       'fixed_original20_recovery_pass':compare.get('all40_recovery_pass',False),
-      'expected_common_accounts':4,'observed_accounts':len(accounts),'common_accounts_complete':len(accounts)==4 and all(r['actually_completed'] for r in accounts),
+      'expected_common_accounts':4,'observed_accounts':sum(p.exists() for p in paths),'common_accounts_complete':all(r['actually_completed'] for r in accounts),
       'common_account_errors':errors,'all_account_recovery_pass':len(accounts)==4 and all(r['recovery']=='PASS' for r in accounts),
       'common_capital_not_stitched':len(accounts)==4 and all(r['one_shared_initial_5500'] for r in accounts),
       'all66_retained':capability['all66_retained'],'preservation_status':preserve['status'],
@@ -120,15 +160,29 @@ def report(sample_version,portfolio_version):
       'Q1 是 POST_REVIEW_EXECUTION_HYPOTHESIS；独立工程样本各自5500美元，未拼成组合曲线。','',
       '## 共同资金P50','',f'新入场区间固定 {START} 至 {END}，61个纽约交易日。每本只有5500美元、整数股、目标50%净权益、最多两仓。至 {TAIL_END} 的尾段只退出和结算，尚存持仓、应收和未结算款不会假平仓。',
       '主表采用同日供应商收盘字段在账本副本上估值，与SPY/QQQ同口径；执行中的当时买卖价、现金路径及意图均不改动。期末持仓未假设卖出，不重复扣卖出费用。','',
-      '| 账户 | 实际处理至 | 季末权益 | 季度净盈亏 | 季度收益 | 最大回撤 | 买/卖成交笔数 | 实际参与股票 |',
-      '|---|---|---:|---:|---:|---:|---|---|']
+      '| 账户 | 状态 | 实际处理至 | 季末权益 | 季度净盈亏 | 季度收益 | 最大回撤 | 季度买/卖成交笔数 | 实际参与股票 |',
+      '|---|---|---|---:|---:|---:|---:|---|---|']
     for r in accounts:
-        lines.append(f'| {r["account"]} | {r["processed_through"] or "未完成"} | {usd(r["quarter_end_equity"])} | {usd(r["quarter_profit"])} | {pct(r["quarter_return"])} | {pct(r["quarter_max_drawdown"])} | {r["buy_fills"]}/{r["sell_fills"]} | {", ".join(r["traded_symbols"]) or "无已核实成交"} |')
+        lines.append(f'| {r["account"]} | {r["status"]} | {r["processed_through"] or "未运行／未完成"} | {usd(r["quarter_end_equity"])} | {usd(r["quarter_profit"])} | {pct(r["quarter_return"])} | {pct(r["quarter_max_drawdown"])} | {r["buy_fills"]}/{r["sell_fills"]} | {", ".join(r["traded_symbols"]) or "无已核实成交"} |')
     if not accounts:lines.append('| 四本共同账户 | NOT_RUN | 未完成 | 未完成 | 未完成 | 未完成 | 未完成 | 不以初始化5500充当回放 |')
     lines+=['','以上收益是该固定季度的累计收益，没有把三个月年化为稳定盈利结论。缺失任何期末价格或未完整走完季度时，权益/回撤保持未知。四本结果不能混合为一条策略曲线。','',
        '| 账户 | 季末现金 | 退出费预留 | 持仓市值 | 未结算 | 分红应收 | 已付佣金 | 模型摩擦 | 尾段现金 | 尾段剩余持仓 |',
        '|---|---:|---:|---:|---:|---:|---:|---:|---:|---|']
     for r in accounts:lines.append(f'| {r["account"]} | {usd(r["quarter_cash"])} | {usd(r["quarter_reserved_exit_fees"])} | {usd(r["quarter_market_value"])} | {usd(r["quarter_unsettled_cash"])} | {usd(r["quarter_dividend_receivable"])} | {usd(r["commission_paid_through_quarter"])} | {usd(r["friction_paid_through_quarter"])} | {usd(r["tail_cash"])} | {", ".join(r["tail_positions"]) or "无／详见完成状态"} |')
+    lines+=['','一季度内实际参与的证券与纽约成交日期如下；尾段退出另保留在各本 fills.csv。缺少完成导出时不能把空表解释为零成交。','',
+            '| 账户 | 证券 | 买入日期 | 卖出日期 | 买入/卖出股数 |','|---|---|---|---|---:|']
+    for r in activity:lines.append(f'| {r["account"]} | {r["symbol"]} | {", ".join(r["buy_dates"]) or "无"} | {", ".join(r["sell_dates"]) or "无"} | {r["buy_shares"]}/{r["sell_shares"]} |')
+    if not activity:lines.append('| 以账户完成状态为准 | 尚无已核实的成交导出 | 未知或无成交 | 未知或无成交 | 不假设 |')
+    partials=[r for r in accounts if r['partial_evidence']]
+    if partials:
+        lines+=['','### 未完成账户的已有断点证据','',
+          '以下仅复制已保存检查点中的财务字段，没有恢复引擎、执行事件或核验完整数据库。中途现金不是期末权益，部分成交记录不是完整季度回测。尚未完整走完季度时，季度收益和回撤保持未知；已保存的季度快照按实际证据单列。','',
+          '| 账户 | 断点事件截止 | 已证明完成的纽约交易日 | 中途现金 | 该断点买/卖成交笔数 | 数据库恢复核验 |',
+          '|---|---|---|---:|---|---|']
+        for r in partials:
+            p=r['partial_evidence'];bounds=p['saved_boundaries']
+            f=pd.read_csv(Path(r['partial_evidence_path'])/'fills.csv')
+            lines.append(f'| {r["account"]} | {bounds["checkpoint_event_cutoff_at"]} | {bounds["latest_completed_trading_session_ny"]} | {usd(p["saved_interim_cash_not_terminal_result"])} | {int(f.side.eq("BUY").sum())}/{int(f.side.eq("SELL").sum())} | {p["recovery_validation"]} |')
     lines+=['','## 同期SPY/QQQ参照','',
       '同为5500美元，首个交易日RTH开盘模型买入，整数股、每实际订单1美元佣金及0.1%摩擦，现金零息。实际付款后下一交易日尝试一次整数股再投资；期末未付款分红列应收。raw账户与all复权总回报参考分开，基金净值已含管理费，不重复扣除；未计税费。','',
       '| 基准 | 状态 | 期末权益 | 净盈亏 | 期末现金 | 期末股数 | 分红应收 |','|---|---|---:|---:|---:|---:|---:|']
@@ -159,9 +213,9 @@ def package(sample_version,portfolio_version):
     def add(path,name=None):
         p=Path(path)
         if p.is_file():selected[name or str(p.relative_to(ROOT)).replace('\\','/')]=p
-    root_names={'BEN_B1_2_RESULTS.md','ACCOUNT_COMPARISON.json','ACCOUNT_COMPARISON.csv','REPORT_RECONCILIATION.json',
+    root_names={'BEN_B1_2_RESULTS.md','ACCOUNT_COMPARISON.json','ACCOUNT_COMPARISON.csv','REPORT_RECONCILIATION.json','P50_ACTIVITY_BY_SYMBOL.csv',
         'B12_PROTOCOL.json','TASK_STATE.json','STAGE_LOG.jsonl','PRESERVATION_BEFORE.json','PRESERVATION_CHECK.json',
-        'Q0_REUSE_VERIFICATION.json','INPUT_CAPABILITY.json','INPUT_CAPABILITY_EARNINGS.json','ALL66_INPUT_COVERAGE.csv',
+        'Q0_REUSE_VERIFICATION.json','INPUT_CAPABILITY.json','INPUT_CAPABILITY_EARNINGS.json','ALL66_INPUT_COVERAGE.csv','PARTIAL_EXPORTS.json',
         'ALL66_DAILY_INPUT_QUALIFICATION.csv','ENVIRONMENT_CHECK.json','DELIVERY_CODE.json','SOURCE_MANIFEST.json','RESUME.md','RULE_DIFFERENCES.md','RESOURCE_BUDGET.md'}
     for name in root_names:add(ROOT/name)
     engineering_names={'ENGINE_INTEGRATION.json','ENGINE_INTEGRATION.md','B12_ENGINE_INTEGRATION.json','BENCHMARK_IMPLEMENTATION_CHECK.json',
@@ -170,17 +224,19 @@ def package(sample_version,portfolio_version):
         'CORRECTION_REASON.json','ALL66_DAILY_INPUT_QUALIFICATION.csv','ALL66_INPUT_COVERAGE.csv','INPUT_CAPABILITY.json',
         'compare_mrvl_compact.py','verify_q0_reuse.py','DELIVERY_VALIDATION.json','FINAL_ENGINEERING_SUMMARY.json',
         'ACQUISITION_PREFLIGHT_BEFORE.json','ACQUISITION_PREFLIGHT_VALIDATION.json','ACQUISITION_REVIEW.json',
-        'validate_completed_accounts.py','DELIVERY_VALIDATION_SAMPLES38.json',
+        'validate_completed_accounts.py','DELIVERY_VALIDATION_SAMPLES38.json','DELIVERY_VALIDATION_SAMPLES40.json','DELIVERY_VALIDATION_A_STAGE.json',
         'extract_partial_checkpoint.py','PARTIAL_EXTRACTOR.md','PARTIAL_EXTRACTOR_TESTS.json',
         'PARTIAL_EXTRACTOR_TESTS_BEFORE_PORTABILITY.json','SOURCE_MANIFEST_BEFORE_REPORT_HELPER.json',
         'SAMPLE_RESOURCE_OBSERVATION_20260914T093853Z.json','FEED_CACHE_REVIEW.json',
-        'SAMPLE_REPORT_REASON_CLEANUP_VERIFICATION.json'}
+        'SAMPLE_REPORT_REASON_CLEANUP_VERIFICATION.json','BENCHMARK_REAL_INPUT_RECONCILIATION.json','A_STAGE_PARTIAL_DELIVERY_REVIEW.md','validate_A_stage.py',
+        'BENCHMARK_REAL_INPUT_FINDINGS.md','REPORT_ONLY_SOURCE_BOUNDARY.json'}
     for stem in ['all_b1_b12','all_b1_b12_compact','b11_regression','compact_initial','compact_expanded','compact_final',
         'data_initial','portfolio_initial','q1_initial','q1_expanded','samples_initial','pytest_benchmarks','pytest_earnings','pytest_delivery','final_regression',
         'shared_cash_mark_boundary_initial','shared_cash_boundary_final','final_recovery_boundary_initial','final_recovery_boundary_final','day_progress_boundary_final',
         'final_regression_before_delivery_fixture_review','acquisition_prefilter','pre_acquisition_final_regression',
         'acquisition_equivalence','acquisition_before_shorter_tmp_name','delivery_validation','delivery_validation_samples38',
-        'partial_extractor','partial_extractor_before_portability','feed_cache_regression','sample_diagnostics_regression']:
+        'partial_extractor','partial_extractor_before_portability','feed_cache_regression','sample_diagnostics_regression',
+        'delivery_validation_samples40','benchmarks_real_run','delivery_activity_regression','delivery_validation_A_stage','delivery_partial_regression']:
         engineering_names.update({stem+'.log',stem+'.xml'})
     zones={'engineering':engineering_names,
        'quality':{'HISTORICAL_QUERY_MAPPING.csv','INPUT_HASHES.json','MARKET_OBJECT_QUALITY.csv','NOW_SPLIT_UNIT_REVIEW.json','QUALITY_SUMMARY.json'},
@@ -190,7 +246,7 @@ def package(sample_version,portfolio_version):
     for folder,names in zones.items():
         for p in (ROOT/folder).rglob('*'):
             if p.name in names and not any(x in p.parts for x in ['private_source_pages','source_pages','private_http_cache']):add(p)
-    run_names={'summary.json','FINAL_ACCOUNT.json','QUARTER_END_ACCOUNT.json','QUARTER_END_LEDGER.json','QUARTER_END_CLOSE_VALUATION.json',
+    run_names={'summary.json','FINAL_ACCOUNT.json','QUARTER_END_ACCOUNT.json','QUARTER_END_LEDGER.json','QUARTER_END_CLOSE_VALUATION.json','LAUNCH.json',
        'CLOSE_VALUATIONS.json','continuous_close_equity.csv','RUN_SPEC.json','RUN_SUMMARY.json','INPUT_HASHES.json','DYNAMIC_INPUT_HASHES.json',
        'QUOTE_COVERAGE.json','COMMON_CLOCK.json','progress.json','RECOVERY_IDEMPOTENCY.json','ARCHIVE_MANIFEST.json','WINDOW_QUOTE_COVERAGE.json',
        'HOLDING_QUOTE_REQUESTS.json','orders.csv','fills.csv','campaigns.csv','daily_equity.csv','coverage_funnel.csv','event_trace.csv',
@@ -200,6 +256,12 @@ def package(sample_version,portfolio_version):
     for prefix in [ROOT/'samples'/sample_version,ROOT/'portfolio'/portfolio_version]:
         for p in prefix.rglob('*'):
             if p.name in run_names:add(p)
+    for account,path in existing(ROOT/'PARTIAL_EXPORTS.json',{}).get('accounts',{}).items():
+        if account not in {f'B12_{mode}_P50_{tier}_{portfolio_version}' for tier in ['A','B'] for mode in ['Q0','Q1']}:
+            raise ValueError('PARTIAL_ACCOUNT_NOT_IN_FIXED_FOUR')
+        partial=verified_partial(path,ROOT/'portfolio'/portfolio_version/account)
+        add(Path(path)/'PARTIAL_EVIDENCE.json')
+        for record in partial['manifest']['files']:add(Path(path)/record['file'])
     benchmark_names={'SUMMARY.json','ACCOUNT.json','daily.csv','fills.csv','dividends.csv','cashflows.csv','order_decisions.csv',
         'RUN_SPEC.json','INPUT_MANIFEST.json','RTH_OPEN_VERIFICATION.json','RUN_STATE.json','MARKET_STATE_REDACTED.json','BENCHMARKS.md','COMPLETE.json'}
     for p in (ROOT/'benchmarks/frozen_v1').rglob('*'):

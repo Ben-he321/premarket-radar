@@ -18,6 +18,21 @@ def put(path, value):
     return path
 
 
+def test_activity_uses_ny_quarter_dates_and_excludes_warmup_and_tail(tmp_path):
+    """Mock exported fills only; this does not run a strategy or market client."""
+    put(tmp_path / 'fills.csv',
+        'at,symbol,side,quantity\n'
+        '2026-01-01T21:05:00Z,MOCK,BUY,99\n'
+        '2026-01-02T21:05:00Z,MOCK,BUY,2\n'
+        '2026-04-01T00:10:00Z,MOCK,SELL,1\n'
+        '2026-04-01T14:00:00Z,MOCK,SELL,1\n')
+    result = delivery.audit_account(tmp_path)
+    assert result['trading_activity'] == [{'symbol': 'MOCK', 'buy_dates': ['2026-01-02'],
+        'sell_dates': ['2026-03-31'], 'buy_shares': 2, 'sell_shares': 1}]
+    assert result['quarter_end_equity'] is None
+    assert result['actually_completed'] is False
+
+
 @pytest.fixture
 def isolated_delivery(tmp_path, monkeypatch):
     for field in ("ROOT", "REPO", "OLD_REPO", "B11", "B1"):
@@ -72,6 +87,68 @@ def test_missing_quarter_evidence_does_not_claim_zero_actual_costs(tmp_path):
     assert row["quarter_end_equity"] is None
     assert row["commission_paid_through_quarter"] is None
     assert row["friction_paid_through_quarter"] is None
+
+
+def partial_fixture(root, account):
+    path=root/'partial_evidence'/'MOCK_ONLY'
+    manifest={'status':'PARTIAL_CHECKPOINT_EVIDENCE_NOT_COMPLETED','source_checkpoint':str(account/'checkpoint.json'),
+        'checkpoint_wrapper_hash_verified':True,'source_unchanged_during_extraction':True,'events_run':0,
+        'full_interval_completed':False,'synthetic_fixture':False,'saved_config':{'run_id':account.name},
+        'saved_interim_cash_not_terminal_result':4200,'files':[]}
+    # Handwritten packaging mock; synthetic_fixture=False only exercises the
+    # real-evidence attestation gate. No research checkpoint or prices are read.
+    for name in delivery.PARTIAL_TABLE_NAMES:
+        content='at,symbol,side,quantity\n2026-01-02T21:05:03Z,MOCK,BUY,2\n' if name=='fills' else 'mock_field\n'
+        file=put(path/(name+'.csv'),content)
+        manifest['files'].append({'file':file.name,'sha256':delivery.sha(file),'rows':1 if name=='fills' else 0})
+    put(path/'PARTIAL_EVIDENCE.json',manifest)
+    return path,manifest
+
+
+def test_partial_finance_is_visible_without_terminal_or_recovery_claim(isolated_delivery):
+    account=isolated_delivery/'portfolio/base_v1/B12_Q0_P50_B_base_v1'
+    put(account/'progress.json',{'processed_day':'2026-01-02'})
+    partial,_=partial_fixture(isolated_delivery,account)
+    row=delivery.audit_account(account,partial)
+    assert row['status']=='PARTIAL_CHECKPOINT_EVIDENCE_NOT_COMPLETED'
+    assert row['traded_symbols']==['MOCK']
+    assert row['partial_evidence']['saved_interim_cash_not_terminal_result']==4200
+    assert row['quarter_end_equity'] is None and row['quarter_profit'] is None
+    assert row['actually_completed'] is False and row['recovery']=='NOT_VERIFIED'
+    assert not (account/'FINAL_ACCOUNT.json').exists()
+
+
+@pytest.mark.parametrize('defect',['altered_csv','wrong_run','synthetic','missing_table'])
+def test_partial_invalid_attestation_refuses_report(isolated_delivery,defect):
+    account=isolated_delivery/'portfolio/base_v1/B12_Q0_P50_B_base_v1'
+    path,manifest=partial_fixture(isolated_delivery,account)
+    if defect=='altered_csv':put(path/'fills.csv','ALTERED')
+    elif defect=='wrong_run':manifest['saved_config']['run_id']='WRONG'
+    elif defect=='synthetic':manifest['synthetic_fixture']=True
+    else:manifest['files'].pop()
+    put(path/'PARTIAL_EVIDENCE.json',manifest)
+    with pytest.raises(ValueError,match='PARTIAL_'):delivery.audit_account(account,path)
+
+
+def test_only_indexed_partial_manifest_and_exact_financial_tables_packaged(isolated_delivery):
+    account=isolated_delivery/'portfolio/base_v1/B12_Q0_P50_B_base_v1'
+    path,_=partial_fixture(isolated_delivery,account)
+    put(path/'raw_quotes.csv','PRIVATE_MOCK_QUOTES')
+    put(path/'checkpoint.json','PRIVATE_MOCK_CHECKPOINT')
+    put(isolated_delivery/'partial_evidence/UNINDEXED/fills.csv','NOT_SELECTED')
+    put(isolated_delivery/'PARTIAL_EXPORTS.json',{'accounts':{account.name:str(path)}})
+    result=delivery.package('sample_test','base_v1')
+    with zipfile.ZipFile(result['zip']) as bundle:
+        names=bundle.namelist()
+        assert 'partial_evidence/MOCK_ONLY/PARTIAL_EVIDENCE.json' in names
+        assert 'partial_evidence/MOCK_ONLY/fills.csv' in names
+        assert not any('raw_quotes' in name or 'checkpoint.json' in name or 'UNINDEXED' in name for name in names)
+
+
+def test_nonexistent_fixed_account_is_not_run_and_cash_not_invented(tmp_path):
+    row=delivery.audit_account(tmp_path/'NEVER_STARTED')
+    assert row['status']=='NOT_RUN' and row['processed_through'] is None
+    assert row['quarter_cash'] is None and row['quarter_end_equity'] is None
 
 
 def test_partial_or_failed_final_file_is_not_completed_account(tmp_path):
