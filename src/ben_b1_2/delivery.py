@@ -169,12 +169,17 @@ def package(sample_version,portfolio_version):
         'MRVL_PRE_COMPACT_ECONOMIC_BASELINE.json','MRVL_COMPACT_EQUIVALENCE.json','MRVL_COMPACT_EQUIVALENCE.md','MRVL_REAL_ECONOMIC_EQUIVALENCE.json',
         'CORRECTION_REASON.json','ALL66_DAILY_INPUT_QUALIFICATION.csv','ALL66_INPUT_COVERAGE.csv','INPUT_CAPABILITY.json',
         'compare_mrvl_compact.py','verify_q0_reuse.py','DELIVERY_VALIDATION.json','FINAL_ENGINEERING_SUMMARY.json',
-        'ACQUISITION_PREFLIGHT_BEFORE.json','ACQUISITION_PREFLIGHT_VALIDATION.json','ACQUISITION_REVIEW.json'}
+        'ACQUISITION_PREFLIGHT_BEFORE.json','ACQUISITION_PREFLIGHT_VALIDATION.json','ACQUISITION_REVIEW.json',
+        'validate_completed_accounts.py','DELIVERY_VALIDATION_SAMPLES38.json',
+        'extract_partial_checkpoint.py','PARTIAL_EXTRACTOR.md','PARTIAL_EXTRACTOR_TESTS.json',
+        'PARTIAL_EXTRACTOR_TESTS_BEFORE_PORTABILITY.json','SOURCE_MANIFEST_BEFORE_REPORT_HELPER.json',
+        'SAMPLE_RESOURCE_OBSERVATION_20260914T093853Z.json'}
     for stem in ['all_b1_b12','all_b1_b12_compact','b11_regression','compact_initial','compact_expanded','compact_final',
         'data_initial','portfolio_initial','q1_initial','q1_expanded','samples_initial','pytest_benchmarks','pytest_earnings','pytest_delivery','final_regression',
         'shared_cash_mark_boundary_initial','shared_cash_boundary_final','final_recovery_boundary_initial','final_recovery_boundary_final','day_progress_boundary_final',
         'final_regression_before_delivery_fixture_review','acquisition_prefilter','pre_acquisition_final_regression',
-        'acquisition_equivalence','acquisition_before_shorter_tmp_name']:
+        'acquisition_equivalence','acquisition_before_shorter_tmp_name','delivery_validation','delivery_validation_samples38',
+        'partial_extractor','partial_extractor_before_portability']:
         engineering_names.update({stem+'.log',stem+'.xml'})
     zones={'engineering':engineering_names,
        'quality':{'HISTORICAL_QUERY_MAPPING.csv','INPUT_HASHES.json','MARKET_OBJECT_QUALITY.csv','NOW_SPLIT_UNIT_REVIEW.json','QUALITY_SUMMARY.json'},
