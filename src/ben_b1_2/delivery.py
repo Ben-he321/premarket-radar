@@ -200,8 +200,8 @@ def report(sample_version,portfolio_version):
     partials=[r for r in accounts if r['partial_evidence']]
     if partials:
         lines+=['','### 未完成账户的已有断点证据','',
-          '以下仅复制已保存检查点中的财务字段，没有恢复引擎、执行事件或核验完整数据库。中途现金不是期末权益，部分成交记录不是完整季度回测。尚未完整走完季度时，季度收益和回撤保持未知；已保存的季度快照按实际证据单列。','',
-          '| 账户 | 断点事件截止 | 已证明完成的纽约交易日 | 中途现金 | 该断点买/卖成交笔数 | 数据库恢复核验 |',
+          '以下财务字段提取操作仅复制已保存检查点，没有恢复引擎、执行事件或核验完整数据库；后续独立副本恢复检查另列。中途现金不是期末权益，部分成交记录不是完整季度回测。尚未完整走完季度时，季度收益和回撤保持未知；已保存的季度快照按实际证据单列。','',
+          '| 账户 | 断点事件截止 | 已证明完成的纽约交易日 | 中途现金 | 该断点买/卖成交笔数 | 提取操作中的数据库核验 |',
           '|---|---|---|---:|---|---|']
         for r in partials:
             p=r['partial_evidence'];bounds=p['saved_boundaries']
@@ -213,6 +213,12 @@ def report(sample_version,portfolio_version):
         for r in partials:
             v=r['latest_saved_close_valuation'] or {}
             lines.append(f'| {account_label(r["account"])} | {v.get("trade_date","未知")} | {usd(v.get("net_equity"))} | {usd(v.get("cash"))} | {usd(v.get("reserved_exit_fees"))} | {usd(v.get("market_value"))} | {usd(v.get("unsettled_cash"))} | {usd(v.get("dividend_receivable"))} | {usd(v.get("debt"))} |')
+        partial_audit=existing(ROOT/'engineering/DELIVERY_VALIDATION_PARTIAL_Q1_B.json',{})
+        if partial_audit:
+            lines+=['',f'已保存部分的财务核对：{partial_audit.get("status","NOT_VERIFIED")}。详见 engineering/DELIVERY_VALIDATION_PARTIAL_Q1_B.md；它只验证已经落盘的现金流、股数、费用与时序，不证明未运行日期的结果。']
+        isolated_restore=existing(ROOT/'engineering/PARTIAL_ISOLATED_RESTORE.json',{})
+        if isolated_restore:
+            lines+=['',f'隔离副本恢复检查：{isolated_restore.get("status","NOT_VERIFIED")}。详见 engineering/PARTIAL_ISOLATED_RESTORE.json。只针对已保存前缀，不执行新事件，不等于季度完成，也不替代四本完整恢复验收。原始提取清单中的 NOT_PERFORMED 仍描述提取操作本身。']
     lines+=['','## 同期SPY/QQQ参照','',
       '同为5500美元，首个交易日RTH开盘模型买入，整数股、每实际订单1美元佣金及0.1%摩擦，现金零息。实际付款后下一交易日尝试一次整数股再投资；期末未付款分红列应收。raw账户与all复权总回报参考分开，基金净值已含管理费，不重复扣除；未计税费。','',
       '| 基准 | 状态 | 期末权益 | 净盈亏 | 期末现金 | 期末股数 | 分红应收 |','|---|---|---:|---:|---:|---:|---:|']
@@ -224,7 +230,7 @@ def report(sample_version,portfolio_version):
       '季度B层24只具有有界普通财报链，A层仅六份独立计划证据；其余未知继续禁止入场。WULF4/14初步财务公告已作为B层实际边界。MRNA初步公告链、BMNR等仍未知，普通季度链也未证明穷尽非定期财务公告。',
       ('已完成A账户的去重归因：每本4026个证券日中，340个有基础信号；其中330个财报未知、3个处于已知财报禁持期、3个RTH口径未核实，仅4个通过A财报门。Q0四个报价不足；Q1的REZI两窗口响应为空，AAOI两窗口仍未通过价差/结构止损/净2R。详细来源与每证券日多原因见 engineering/A_ZERO_ENTRY_EXPLANATION.md 和同名JSON，重复报价不增加独立机会数。' if (ROOT/'engineering/A_ZERO_ENTRY_EXPLANATION.json').is_file() else 'A层零入场的细分证据以实际账户导出为准，未生成时不推断原因。'),
       f'Finnhub精确配置入口仍缺 FINNHUB_API_KEY，接口权限未验证。准确位置为 `{OLD_REPO / ".streamlit/secrets.toml"}` 顶层；本轮不要求重新填写已有Alpaca密钥，没有购买服务。',
-      f'真实输入质量检查覆盖{quality["checked_objects"]}个对象、{quality["rows"]:,}行：重复{quality["duplicates"]}、无效OHLC {quality["invalid_ohlc"]}、缺失成交量{quality["missing_volume"]}。空响应、分钟无成交、停牌与接口失败不互相替代。',
+      f'初始历史输入质量检查覆盖{quality["checked_objects"]}个对象、{quality["rows"]:,}行：重复{quality["duplicates"]}、无效OHLC {quality["invalid_ohlc"]}、缺失成交量{quality["missing_volume"]}。此项不代表随后全部持仓报价已完成同一项检查；报价请求和错误另见各账户覆盖记录。空响应、分钟无成交、停牌与接口失败不互相替代。',
       '排序成交量仅在原已核对竞价量的日期可用；未知不填零，价差完全并列又缺二级排序量时按原内核保留未知。NOW预热期5:1拆股在12/18生效边界换算旧历史单位，未来公司行动不提前作用。',
       '旧历史网络接收时间为UNKNOWN；当前抓取时间和计划保守可得边界单独保存。历史收盘后1分钟定稿只是模型假设，Basic当前实时可得性未验证；历史L1不是排队或真实成交证明。','',
       '报价数量按当前冻结实现直接使用股数、倍率为1。Alpaca专门变更公告确认自2025-11-03起使用该口径，支持本轮2026年1—4月数据；没有乘100或按证券价格再乘整手数量。通用页面的旧描述冲突及更早历史归一化未知，详见 engineering/QUOTE_SIZE_UNIT_SOURCE_REVIEW.md。','',
@@ -234,7 +240,7 @@ def report(sample_version,portfolio_version):
       '工程验证以 engineering/FINAL_ENGINEERING_SUMMARY.json 及对应日志为准：一次完整回归240项通过；之后缓存、数据请求、诊断和部分证据交付边界按修改范围补测。新增与重复执行次数分别记录，不能把分批通过项数说成一次完整测试，也不能以mock工程测试代替真实历史验收。',
       '运行状态以TASK_STATE.json、samples/WORKER_STATE.json、账户progress.json及PID实际存在为准。恢复使用对应版本checkpoint和同目录replay_archive.sqlite，并核对动态输入哈希；先检查有没有同名进程，不能启动第二份相同账户。完整本地数据库不在验收ZIP内。','',
       '## 结论与下一步','',
-      '本轮交付应区分：有真实模型成交的工程回放；全部条件不满足而零成交；数据未知导致无法评价；以及因错误/预算未完成的账户。具体状态和错误不以空表或初始化现金代替。',
+      '本轮交付应区分：有真实模型成交的工程回放；全部条件不满足而零成交；数据未知导致无法评价；以及因错误/资源边界未完成的账户。具体状态和错误不以空表或初始化现金代替。',
       ('固定20样本的报价时窗对照已全部完成。' if compare['all40_completed'] else '固定20样本的报价时窗对照尚未全部完成，不对未完成样本下结论。')+'更多交易不自动意味着更好。共同资金结果仍受财报、范围版本、收盘及竞价量、历史行情可得性等限制，因此不能确认策略具有独立优势，也不能仅凭当前覆盖受限样本断言没有优势。',
       '下一步最少是补齐可靠的历史计划版本、已知初步财务公告链、缺失证券日期及相应交易时点输入；Finnhub如需使用先由Ben配置现有凭证并验证权限，而非购买服务。当前Basic实时执行条件仍未完成验证。P100、P200、其余消融和Ben前向均保留待后续，本轮不扩参或自动晋级。']
     closure=existing(ROOT/'EXECUTION_CLOSURE.json',{})
@@ -270,14 +276,18 @@ def package(sample_version,portfolio_version):
         'PARTIAL_EXTRACTOR_TESTS_BEFORE_PORTABILITY.json','SOURCE_MANIFEST_BEFORE_REPORT_HELPER.json',
         'SAMPLE_RESOURCE_OBSERVATION_20260914T093853Z.json','FEED_CACHE_REVIEW.json',
         'SAMPLE_REPORT_REASON_CLEANUP_VERIFICATION.json','BENCHMARK_REAL_INPUT_RECONCILIATION.json','A_STAGE_PARTIAL_DELIVERY_REVIEW.md','validate_A_stage.py',
-        'BENCHMARK_REAL_INPUT_FINDINGS.md','REPORT_ONLY_SOURCE_BOUNDARY.json','A_ZERO_ENTRY_EXPLANATION.json','A_ZERO_ENTRY_EXPLANATION.md'}
+        'BENCHMARK_REAL_INPUT_FINDINGS.md','REPORT_ONLY_SOURCE_BOUNDARY.json','A_ZERO_ENTRY_EXPLANATION.json','A_ZERO_ENTRY_EXPLANATION.md',
+        'DELIVERY_VALIDATION_PARTIAL_Q1_B.json','DELIVERY_VALIDATION_PARTIAL_Q1_B.md','validate_partial_q1_b.py',
+        'delivery_validation_partial_q1_b.log','delivery_validation_final.log','FINAL_VALIDATION_PRESERVATION.json',
+        'DELIVERY_VALIDATION_BEFORE_FINAL_AGGREGATE.json','partial_actual_extraction.log',
+        'PARTIAL_ISOLATED_RESTORE.json','PARTIAL_ISOLATED_RESTORE.md','PARTIAL_ISOLATED_RESTORE.log','PARTIAL_ISOLATED_RESTORE.py'}
     for stem in ['all_b1_b12','all_b1_b12_compact','b11_regression','compact_initial','compact_expanded','compact_final',
         'data_initial','portfolio_initial','q1_initial','q1_expanded','samples_initial','pytest_benchmarks','pytest_earnings','pytest_delivery','final_regression',
         'shared_cash_mark_boundary_initial','shared_cash_boundary_final','final_recovery_boundary_initial','final_recovery_boundary_final','day_progress_boundary_final',
         'final_regression_before_delivery_fixture_review','acquisition_prefilter','pre_acquisition_final_regression',
         'acquisition_equivalence','acquisition_before_shorter_tmp_name','delivery_validation','delivery_validation_samples38',
         'partial_extractor','partial_extractor_before_portability','feed_cache_regression','sample_diagnostics_regression',
-        'delivery_validation_samples40','benchmarks_real_run','delivery_activity_regression','delivery_validation_A_stage','delivery_partial_regression','delivery_validation_Q0_B_stage','delivery_interim_valuation_regression','delivery_unknown_boundary_regression','delivery_mixed_timestamp_regression','delivery_shared_evidence_regression']:
+        'delivery_validation_samples40','benchmarks_real_run','delivery_activity_regression','delivery_validation_A_stage','delivery_partial_regression','delivery_validation_Q0_B_stage','delivery_interim_valuation_regression','delivery_unknown_boundary_regression','delivery_mixed_timestamp_regression','delivery_shared_evidence_regression','delivery_final_narrative_regression']:
         engineering_names.update({stem+'.log',stem+'.xml'})
     zones={'engineering':engineering_names,
        'quality':{'HISTORICAL_QUERY_MAPPING.csv','INPUT_HASHES.json','MARKET_OBJECT_QUALITY.csv','NOW_SPLIT_UNIT_REVIEW.json','QUALITY_SUMMARY.json'},
