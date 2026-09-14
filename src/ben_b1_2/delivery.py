@@ -168,11 +168,13 @@ def package(sample_version,portfolio_version):
         'CHECKOUT_LINE_ENDING_RESTORATION.json','Q0_REUSE_FIRST_CHECK_LINE_ENDINGS.json','MRVL_INPUT_PRESERVATION_BEFORE_COMPACT.json',
         'MRVL_PRE_COMPACT_ECONOMIC_BASELINE.json','MRVL_COMPACT_EQUIVALENCE.json','MRVL_COMPACT_EQUIVALENCE.md','MRVL_REAL_ECONOMIC_EQUIVALENCE.json',
         'CORRECTION_REASON.json','ALL66_DAILY_INPUT_QUALIFICATION.csv','ALL66_INPUT_COVERAGE.csv','INPUT_CAPABILITY.json',
-        'compare_mrvl_compact.py','verify_q0_reuse.py','DELIVERY_VALIDATION.json','FINAL_ENGINEERING_SUMMARY.json'}
+        'compare_mrvl_compact.py','verify_q0_reuse.py','DELIVERY_VALIDATION.json','FINAL_ENGINEERING_SUMMARY.json',
+        'ACQUISITION_PREFLIGHT_BEFORE.json','ACQUISITION_PREFLIGHT_VALIDATION.json','ACQUISITION_REVIEW.json'}
     for stem in ['all_b1_b12','all_b1_b12_compact','b11_regression','compact_initial','compact_expanded','compact_final',
         'data_initial','portfolio_initial','q1_initial','q1_expanded','samples_initial','pytest_benchmarks','pytest_earnings','pytest_delivery','final_regression',
         'shared_cash_mark_boundary_initial','shared_cash_boundary_final','final_recovery_boundary_initial','final_recovery_boundary_final','day_progress_boundary_final',
-        'final_regression_before_delivery_fixture_review']:
+        'final_regression_before_delivery_fixture_review','acquisition_prefilter','pre_acquisition_final_regression',
+        'acquisition_equivalence','acquisition_before_shorter_tmp_name']:
         engineering_names.update({stem+'.log',stem+'.xml'})
     zones={'engineering':engineering_names,
        'quality':{'HISTORICAL_QUERY_MAPPING.csv','INPUT_HASHES.json','MARKET_OBJECT_QUALITY.csv','NOW_SPLIT_UNIT_REVIEW.json','QUALITY_SUMMARY.json'},

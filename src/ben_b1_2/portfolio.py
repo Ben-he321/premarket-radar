@@ -183,6 +183,29 @@ def eligible_for_quote(engine,symbol,day):
               engine._post_exit_repairs(symbol),float(d.close),float(p.high),e,engine.state['at'])['allowed']
     return rules.entry_signal(float(d.close),float(p.close),e,prev,int(d.valid_sessions))['allowed']
 
+def acquisition_eligible(engine,symbol,day,window_events):
+    """Conservatively omit only structurally unknowable entry windows.
+
+    A currently blocked gate can recover at close+5 without a new revision, so
+    its current Boolean is deliberately NOT a download filter. Nonempty known
+    revisions keep quotes even when that gate currently rejects. Any pending
+    within-window revision also keeps the complete causal input window.
+    """
+    result={'allowed':False,'price_candidate':eligible_for_quote(engine,symbol,day),'reason':'PRICE_SIGNAL_NOT_ELIGIBLE'}
+    if not result['price_candidate']:return result
+    now=pd.Timestamp(engine.state['at']);end=pd.Timestamp(engine._clock()['entry_expiry'])
+    if any(e['kind']=='EARNINGS_REVISION' and e.get('symbol')==symbol and now<pd.Timestamp(e['at'])<end for e in window_events):
+        return {**result,'allowed':True,'reason':'WITHIN_WINDOW_REVISION_KEEP_CAUSAL_QUOTES'}
+    if not engine.state['earnings'].get(symbol):
+        return {**result,'reason':'EARNINGS_UNKNOWN_NO_KNOWN_REVISION_OR_WITHIN_WINDOW_UPDATE'}
+    if engine.config.earnings_tier=='B':
+        coverage=engine.state['earnings_coverage'].get(symbol,{})
+        if not coverage.get('complete'):
+            return {**result,'reason':'CONTINUOUS_ACTUAL_RELEASE_COVERAGE_NOT_VERIFIED'}
+        if (coverage.get('start') and day<coverage['start']) or (coverage.get('end') and day>coverage['end']):
+            return {**result,'reason':'OUTSIDE_VERIFIED_CONTINUOUS_ACTUAL_RELEASE_WINDOW'}
+    return {**result,'allowed':True,'reason':'POTENTIAL_WINDOW_QUALIFICATION_NOT_PREJUDGED'}
+
 def run_account(mode,tier,earnings_path,version='base_v1'):
     inputs=ContinuousInputs(earnings_path)
     run_id=f'B12_{mode}_P50_{tier}_{version}';out=ROOT/'portfolio'/version/run_id;out.mkdir(parents=True,exist_ok=True)
@@ -268,7 +291,16 @@ def run_account(mode,tier,earnings_path,version='base_v1'):
             engine.checkpoint_path=None
             engine.run(before)
             engine.checkpoint_path=checkpoint
-            candidates=[s for s in inputs.universe if day<=END and eligible_for_quote(engine,s,day)]
+            candidates=[]
+            if day<=END:
+                for s in inputs.universe:
+                    acquisition=acquisition_eligible(engine,s,day,late)
+                    if acquisition['allowed']:candidates.append(s)
+                    elif acquisition['price_candidate']:
+                        inputs.coverage.append({'symbol':s,'day':day,'purpose':'CAUSAL_SIGNAL_ENTRY_WINDOW',
+                            'status':'NOT_REQUESTED_EARNINGS_UNVERIFIABLE_THIS_WINDOW','rows':None,'complete':None,
+                            'quote_availability':'NOT_CHECKED','acquisition_reason':acquisition['reason'],
+                            'as_of_event_time':engine.state['at'],'all66_fixed_decisions_retained':True})
             # Date then immutable identity only controls downloads. Engine uses
             # actual arrival clock, present spread and only then frozen tie keys.
             for s in sorted(candidates,key=lambda s:inputs.universe[s]['identity_sort_hash']):
