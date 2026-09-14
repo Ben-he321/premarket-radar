@@ -87,6 +87,14 @@ def run():
     for pattern in ('STOP_RECORD_*.json','RUNNER_EXIT_*.json'):
         for p in ROOT.glob(pattern):add(p,'continuation/'+p.name)
     add(ROOT/'ACTIVE_ENGINEERING_GATE.json','continuation/ACTIVE_ENGINEERING_GATE.json',required=False)
+    for pattern in ('STORAGE_MIGRATION*.json','PLANNED_STORAGE*.json','RUNNER_PROCESS_before_storage_stop.json','TASK_STATE_before_storage_stop.json'):
+        for p in ROOT.glob(pattern):add(p,'continuation/'+p.name)
+    for p in (REPO/'tests').glob('test_ben_b1_2_storage_*.py'):add(p,'code/tests/'+p.name)
+    add(REPO/'tests/test_ben_b1_2_report_support.py','code/tests/test_ben_b1_2_report_support.py')
+    add(REPO/'scripts/run_b12_continuation.py','code/scripts/run_b12_continuation.py')
+    for p in (ROOT/'engineering/storage_revision3').rglob('*.json'):
+        if 'checkpoint' not in p.name.lower() and p.name in ('BLOCK_PROOFS.json','ENGINEERING_RUN.json','DENSE_REAL_EQUIVALENCE.json','REAL_DENSE_CRASH_RECOVERY.json'):
+            add(p,'engineering/storage_revision3/'+p.relative_to(ROOT/'engineering/storage_revision3').as_posix())
     for p in (ROOT/'attempts').rglob('*'):
         if p.is_file() and p.suffix in ('.json','.jsonl','.log','.py') and 'checkpoint' not in p.name.lower():
             add(p,'attempts/'+str(p.relative_to(ROOT/'attempts')).replace('\\','/'))

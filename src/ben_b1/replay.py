@@ -909,6 +909,9 @@ class ReplayEngine:
     def _rollback_state(self, kind, heavy):
         return copy.deepcopy({k: v for k, v in self.state.items() if k not in heavy})
 
+    def _rollback_ledger(self, kind):
+        return self.ledger.to_dict()
+
     def process(self, event: dict) -> dict:
         e = _clean(copy.deepcopy(event))
         for key in ("event_id", "kind", "at"):
@@ -931,7 +934,7 @@ class ReplayEngine:
             raise ValueError("UNIMPLEMENTED_EVENT_KIND")
         if symbol and symbol not in self.universe:
             raise ValueError("SYMBOL_NOT_IN_FROZEN_UNIVERSE")
-        ledger_before = self.ledger.to_dict()
+        ledger_before = self._rollback_ledger(kind)
         # Undo snapshots cover precisely the mutable collections this event may
         # touch. Copying all past quotes/minutes per tick would be quadratic.
         heavy = {"bars", "minutes", "quote_inventory", "trace", "handled", "equity", "decisions", "errors", "gaps", "repairs"}

@@ -13,6 +13,7 @@ import pandas_market_calendars as mcal
 from src.ben_b1.ledger import Ledger
 from src.ben_b1_2.compact import stream_hash
 from .runtime import *
+from .report_support import coverage_summary,verified_benchmarks
 
 START='2026-01-02'
 END='2026-03-31'
@@ -162,6 +163,13 @@ def engineering_evidence():
                      ('crash','REAL_DENSE_CRASH_RECOVERY.json'),('normalization','REAL_DENSE_INPUT_EQUIVALENCE_v2.json')]:
         result[key]=read(ROOT/'engineering'/name)
     result['status']='PASS' if gate['status']=='PASS' and all(r['hash_matches'] for r in checked) and all(result[k].get('status','').startswith('PASS') for k in ('restore','dense','crash','normalization')) else 'FAIL'
+    if (ROOT/'engineering/STORAGE_MIGRATION_EXPECTED.json').exists():
+        p=ROOT/'engineering/STORAGE_MIGRATION_RESTORE.json'
+        result['storage_migration_restore']=read(p) if p.exists() else {'status':'NOT_VERIFIED'}
+        if result['storage_migration_restore'].get('status')!='PASS':result['status']='FAIL'
+        for key,name in [('storage_dense','STORAGE_DENSE_REAL_EQUIVALENCE.json'),('storage_crash','STORAGE_REAL_CRASH_RECOVERY.json')]:
+            p=ROOT/'engineering'/name;result[key]=read(p) if p.exists() else {'status':'NOT_VERIFIED'}
+            if result[key]['status']!='PASS':result['status']='FAIL'
     return result
 
 def run():
@@ -179,7 +187,7 @@ def run():
             v['minimum_free_memory_mib']=min(v['minimum_free_memory_mib'],r['free_memory_mib'])
             v['minimum_free_disk_bytes']=min(v['minimum_free_disk_bytes'],r['free_disk_bytes'])
             global_peak=max(global_peak,r['peak_rss_mib'])
-    error_samples=list(ROOT.glob('STOP_RECORD*.json'))+list((ROOT/'attempts').rglob('STOP_RECORD*.json'))
+    error_samples=list(ROOT.glob('STOP_RECORD*.json'))+list((ROOT/'attempts').rglob('STOP_RECORD*.json'))+list(ROOT.glob('PLANNED_STORAGE_STOP.json'))
     for path in error_samples:
         recorded=read(path).get('process_memory') or {}
         global_peak=max(global_peak,recorded.get('peak_rss_mib',0))
@@ -195,6 +203,9 @@ def run():
         tail,tail_parts=analyze(directory,label,quarter=False)
         final_summary=read(directory/'FINAL_ACCOUNT.json') if (directory/'FINAL_ACCOUNT.json').exists() else {}
         saved_progress=read(directory/'progress.json')
+        coverage=coverage_summary(read(directory/'QUOTE_COVERAGE.json'),saved_progress['processed_day'])
+        write(final/(label.replace('/','_')+'_QUOTE_COVERAGE_SUMMARY.json'),coverage)
+        write_csv(final/(label.replace('/','_')+'_QUOTE_COVERAGE_SUMMARY.csv'),coverage['groups'])
         tail['tail_period_processed']=bool(tail['latest_completed_day']==TAIL_END and saved_progress.get('processed_day')==TAIL_END
             and tail['checkpoint_read_only_verification']['hash_verified'])
         tail['final_export_attested']=bool(final_summary.get('actually_executed') and final_summary.get('processed_through')==TAIL_END and final_summary.get('error_count')==0)
@@ -212,7 +223,9 @@ def run():
         write(final/(label.replace('/','_')+'_TAIL_RECONCILIATION.json'),tail)
         write_csv(final/(label.replace('/','_')+'_TAIL_CAMPAIGN_PARTITIONS.csv'),tail_parts)
         sources[label]=str(directory)
-    benchmarks=read(OLD/'benchmarks/frozen_v1/SUMMARY.json')
+    benchmark_map,benchmark_proof=verified_benchmarks(OLD/'benchmarks/frozen_v1',START,END)
+    benchmarks=[benchmark_map[s] for s in ('SPY','QQQ')]
+    write(final/'BENCHMARK_READ_ONLY_VERIFICATION.json',benchmark_proof)
     write(final/'BENCHMARKS_REUSED.json',{'source':str(OLD/'benchmarks/frozen_v1'),'sha256':sha(OLD/'benchmarks/frozen_v1/SUMMARY.json'),'results':benchmarks,'recomputed':False})
     table=[]
     for r in rows:
@@ -220,8 +233,8 @@ def run():
             '季度已平仓损益':r['closed_campaign_net_profit'] if r['quarter_complete'] else None,
             '季度未平仓浮盈':r['unrealized_open_mark_profit'] if r['quarter_complete'] else None,
             '季度总损益':r['total_net_profit'] if r['quarter_complete'] else None,'日收盘最大回撤':r['maximum_close_drawdown'] if r['quarter_complete'] else None,
-            '相对SPY美元':r['quarter_end_equity']-benchmarks[0]['end_equity_usd'] if r['quarter_complete'] else None,
-            '相对QQQ美元':r['quarter_end_equity']-benchmarks[1]['end_equity_usd'] if r['quarter_complete'] else None})
+            '相对SPY美元':r['quarter_end_equity']-benchmark_map['SPY']['end_equity_usd'] if r['quarter_complete'] else None,
+            '相对QQQ美元':r['quarter_end_equity']-benchmark_map['QQQ']['end_equity_usd'] if r['quarter_complete'] else None})
     for b in benchmarks:
         last=pd.read_csv(OLD/'benchmarks/frozen_v1'/b['symbol']/'daily.csv').iloc[-1]
         table.append({'账户':b['symbol'],'季度完整':True,'3月31日权益':b['end_equity_usd'],'季度已平仓损益':0,
@@ -246,12 +259,15 @@ def run():
         f"分红权益{money(q['dividend_income_entitled'])}美元、融资利息{money(q['interest'])}美元。费用已在现金流和损益中扣除；佣金{money(q['commission'])}美元、摩擦成本{money(q['friction'])}美元不再次扣除。期末未强制卖出，因此未预扣未来平仓费用。",
         '', 'SPY和QQQ沿用原2026-01-02至03-31、5500美元整数股账户。起始按首交易日常规时段首分钟开盘价、每实际订单1美元及10bp执行摩擦；股息按实际到账日确认现金，下一严格更晚交易日开盘尝试整数股再投资，零股不下单。期末按原始收盘价估值，SPY未到账分红权益14.38美元单列，现金零利息。基金管理费不重复扣除，未计税费。复权总回报参考线与现金分红账户分开。',
         '', '四本账户均受原66候选身份、历史量价覆盖及财报证据限制。A层PIT证据不足导致零入场，不能称策略通过；B层使用回顾性的已发布财报排除，不能冒充完整PIT或前向可执行优势。未知财报、身份或历史输入仍UNKNOWN，未取消门槛。覆盖有限的组合与完整指数比较，不是独立盈利证明。',
+        '逐本QUOTE_COVERAGE_SUMMARY文件按已保存日期、证券/日期/用途去重，分别保留成功请求、完整空响应、未请求和未知/失败；报价条数不是独立覆盖样本，complete仅证明请求分页完成。未正式保存日期的记录另列，不计为已完成。基准61个交易日、5500美元本金及原完成清单哈希均重新只读核对。',
         '', f"4月尾段／最新已保存账本：截至{tail['latest_completed_day']}，权益{money(tail['latest_completed_close_equity'])}美元、现金{money(tail['cash'])}美元、未结算款{money(tail['unsettled_cash'])}美元、持仓{json.dumps(tail['positions'],ensure_ascii=False)}。尾段完成={tail['tail_complete']}，最终恢复={tail['recovery'].get('status')}，全部持仓已退出且结算={tail['all_positions_closed_and_settled']}。季度末之后的权益变化{money(tail['change_after_quarter_end']['equity'])}美元，新增买入成交{tail['change_after_quarter_end']['buy_fills']}笔、卖出成交{tail['change_after_quarter_end']['sell_fills']}笔；未完成字段保留未知。",
         f"工程证据复核={evidence['status']}；旧检查点恢复={evidence['restore']['status']}；{evidence['dense']['real_events']}条真实事件、{evidence['dense']['block_count']}段状态等价={evidence['dense']['status']}；真实中断与重复幂等={evidence['crash']['status']}；真实报价分批输入等价={evidence['normalization']['status']}。{evidence['regression_cases']}项回归及{evidence['repeated_final_guard_cases']}项最终重复复验读取实际冻结证据，重复复验不另算独立用例。私有完整备份与逐文件核对记录另附。",
         f'心跳及错误记录中的进程内存峰值最高为{global_peak:.2f}MiB。各读取、排序、事件积累、归档和恢复阶段的观测值另见OBSERVED_PHASE_MEMORY.csv；阶段采样值不冒充精确的内存分配点。',
         '', '另外三本完成账户直接复用，原M20/U服务及账本不重启、不改动。仅原共享API限流元数据继续用于共同配额，不涉及其交易逻辑。代码分支codex/ben-b1-2-resume-streaming，草稿PR #32，不合并main。']
     if stop:text += ['',f"本轮停止原因：{stop['type']} / {stop['reason']}，时间{stop['at']}。原轮次的停止原因和未完成状态没有改写。"]
     elif last_error:text += ['',f"本轮早先尝试在{last_error['at']}发生{last_error['type']}，其错误、源码、状态和恢复证据保存在attempts目录；该错误不是当前尝试的停止状态。"]
+    if 'storage_migration_restore' in evidence:
+        text += ['',f"存储迁移：本轮C盘完整静止副本244个文件、13324049727字节保留，D盘只重定位检查点归档路径。第二次尝试在18:50:19 UTC按已记录的30分钟等待边界计划停机，Jan23没有提交，不改写为资源故障。新版本55项回归、590924真实事件逐块等价及179253事件中断重放均PASS；D盘实际全量迁移恢复={evidence['storage_migration_restore']['status']}。它们与前述早期工程案例有重叠，不相加冒充独立用例数。"]
     text += ['',f"恢复入口：{REPO}，模块src.ben_b1_2_continuation.runner；读取本轮ENGINEERING_GATE和同一私有检查点，拒绝从头初始化。授权硬截止{DEADLINE}；截止后需新一轮明确授权。",
         '', '验证包不包含密钥、原始行情、Parquet、完整检查点、SQLite、WAL、SHM或私有全量备份。完整私有恢复副本仍留在本地。']
     (final/'BEN_B1_2_CONTINUATION_RESULTS.md').write_text('\n'.join(text)+'\n',encoding='utf-8')

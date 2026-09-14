@@ -10,7 +10,7 @@ if os.name=='nt':import msvcrt
 
 REPO = Path(__file__).resolve().parents[2]
 OLD = Path('C:/Users/benhe/BenAITradingData/ben-b1-2-window-portfolio-20260914')
-ROOT = OLD.parent/'ben-b1-2-continuation-20260914T154608Z'
+ROOT = Path('D:/BenAITradingData/ben-b1-2-continuation-20260914T154608Z')
 RUN_ID = 'B12_Q1_P50_B_compact_base_v1'
 SOURCE_ACCOUNT = OLD/'portfolio/compact_base_v1'/RUN_ID
 ACCOUNT = ROOT/'account'/RUN_ID

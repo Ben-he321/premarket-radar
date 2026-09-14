@@ -12,6 +12,7 @@ from src.ben_b1.replay import PRIORITY, _json
 from src.ben_b1.replay import _hash
 import pandas as pd
 from .engine import StreamingSharedEngine, mapping_digest
+from .rollback import quote_ledger_snapshot,quote_state_memo
 
 class EventSpool:
     def __init__(self,directory,guard=None):
@@ -91,15 +92,19 @@ class BoundedReplayEngine(StreamingSharedEngine):
     guard_hook=None
     batch_hook=None
 
+    def _rollback_ledger(self,kind):
+        if kind=='QUOTE':return quote_ledger_snapshot(self.ledger)
+        return super()._rollback_ledger(kind)
+
     def _rollback_state(self,kind,heavy):
         if kind!='QUOTE':return super()._rollback_state(kind,heavy)
         # These branches are read-only throughout QUOTE handling. A fresh memo
         # for this event retains aliases; all mutable/unknown branches and the
-        # entire ledger still receive the original deep rollback snapshot.
+        # mutable financial objects still receive full rollback snapshots.
         immutable={'earnings','earnings_coverage','input_versions','corporate_unit_uncertainty',
             'active_gaps','close_finalized','unit_versions','sessions_processed','coverage_limitations',
             'b12_completed_day','archive'}
-        memo={id(self.state[k]):self.state[k] for k in immutable if k in self.state}
+        memo=quote_state_memo(self.state,immutable)
         return copy.deepcopy({k:v for k,v in self.state.items() if k not in heavy},memo)
 
     def _day(self,at=None):
@@ -120,6 +125,7 @@ class BoundedReplayEngine(StreamingSharedEngine):
         if self.state['q1_batch']['arrivals']:return {'status':'DEFERRED_UNCLOSED_QUOTE_TIMESTAMP_BATCH'}
         if not self.state['handled']:return {'status':'NO_NEW_HANDLED_EVENTS'}
         db=self._db;db.execute('PRAGMA temp_store=FILE')
+        db.execute('PRAGMA temp.cache_size=-32768')
         if self.batch_hook:self.batch_hook({'phase':'COMPACTION_DISK_STAGE','live_events':len(self.state['handled']),'live_inventory':len(self.state['quote_inventory'])})
         self._compact_checked=0.
         def sql_guard():
@@ -127,8 +133,8 @@ class BoundedReplayEngine(StreamingSharedEngine):
                 self._compact_checked=time.monotonic();self.guard_hook()
             return 0
         db.set_progress_handler(sql_guard,100000)
-        db.execute('CREATE TEMP TABLE IF NOT EXISTS stage_events(event_id TEXT PRIMARY KEY,digest TEXT)')
-        db.execute('CREATE TEMP TABLE IF NOT EXISTS stage_quotes(inventory_id TEXT PRIMARY KEY,payload TEXT,digest TEXT)')
+        db.execute('CREATE TEMP TABLE IF NOT EXISTS stage_events(event_id TEXT PRIMARY KEY,digest TEXT) WITHOUT ROWID')
+        db.execute('CREATE TEMP TABLE IF NOT EXISTS stage_quotes(inventory_id TEXT PRIMARY KEY,payload TEXT,digest TEXT) WITHOUT ROWID')
         db.execute('DELETE FROM stage_events');db.execute('DELETE FROM stage_quotes')
         current={q['inventory_id'] for q in self.state['quotes'].values()}
         cutoff=rules.aware(self.state['at'])-pd.Timedelta(seconds=5)
@@ -153,8 +159,8 @@ class BoundedReplayEngine(StreamingSharedEngine):
             if bad:raise ValueError('ARCHIVED_EVENT_DIGEST_OR_GENERATION_CONFLICT')
             bad=db.execute('SELECT 1 FROM stage_quotes s JOIN archived_quotes a USING(inventory_id) WHERE s.digest!=a.digest OR a.block_sequence!=? LIMIT 1',(sequence,)).fetchone()
             if bad:raise ValueError('ARCHIVED_QUOTE_DIGEST_OR_GENERATION_CONFLICT')
-            db.execute('INSERT OR IGNORE INTO archived_events SELECT event_id,digest,? FROM stage_events',(sequence,))
-            db.execute('INSERT OR IGNORE INTO archived_quotes SELECT inventory_id,payload,digest,? FROM stage_quotes',(sequence,))
+            db.execute('INSERT OR IGNORE INTO archived_events SELECT event_id,digest,? FROM stage_events ORDER BY event_id COLLATE BINARY',(sequence,))
+            db.execute('INSERT OR IGNORE INTO archived_quotes SELECT inventory_id,payload,digest,? FROM stage_quotes ORDER BY inventory_id COLLATE BINARY',(sequence,))
             db.execute('INSERT OR IGNORE INTO archive_blocks VALUES(?,?,?)',(sequence,block_hash,json.dumps(block,sort_keys=True,separators=(',',':'))))
         if self.after_archive_commit_hook is not None:self.after_archive_commit_hook(block)
         if self.batch_hook:self.batch_hook({'phase':'COMPACTION_ARCHIVE_COMMITTED','event_count':event_count,'quote_count':quote_count})

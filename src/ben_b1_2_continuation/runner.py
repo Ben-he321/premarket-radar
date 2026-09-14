@@ -17,6 +17,7 @@ from .runtime import *
 from .inputs import StreamingInputs,StreamingMarket
 from .execution import BoundedReplayEngine as ReplayEngine,EventSpool
 from .restore_check import process_memory
+from .migration import verify_migrated_engine
 NY='America/New_York'
 deadline=guard
 _engine=None
@@ -62,9 +63,11 @@ def resume():
         # JSON tuples and lists are equivalent in the frozen specification.
         if json.loads(json.dumps(engine._payload()['config']))!=oldspec['config']:raise ValueError('ORIGINAL_RUN_CONFIG_CHANGED')
     if engine.universe!=inputs.universe:raise ValueError('ORIGINAL_ALL66_UNIVERSE_CHANGED')
+    verify_migrated_engine(engine,ROOT)
     if engine.state.get('b12_completed_day',{}).get('day','')<'2026-01-22':raise ValueError('ORIGINAL_PREFIX_MISSING')
     if engine.state['b12_completed_day']['day']=='2026-01-22':
-        proof=read(ROOT/'engineering/REAL_PREFIX_RESTORE.json')
+        migration_proof=ROOT/'engineering/STORAGE_MIGRATION_EXPECTED.json'
+        proof=read(migration_proof if migration_proof.exists() else ROOT/'engineering/REAL_PREFIX_RESTORE.json')
         if engine.state_digest()!=proof['relocated_wrapper_sha256']:raise ValueError('JAN22_STATE_DIVERGED_BEFORE_RESUME')
     out=ACCOUNT;run_id=RUN_ID;tier='B';final_path=out/'FINAL_ACCOUNT.json';recovery_path=out/'RECOVERY_IDEMPOTENCY.json'
     write(ROOT/'CONTINUATION_RUN_SPEC.json',{'at':utc(),'old_run_spec_sha256':sha(SOURCE_ACCOUNT/'RUN_SPEC.json'),
