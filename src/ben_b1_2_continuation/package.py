@@ -49,6 +49,9 @@ def run():
     if read(ROOT/'RUNNER_PROCESS.json')['status']!='STOPPED':raise ValueError('NO_PACKAGE_WHILE_WRITER_ACTIVE')
     if not (ROOT/'final/ACTUAL_COMPLETION.json').exists():raise ValueError('FINAL_RECONCILIATION_REQUIRED')
     completion=read(ROOT/'final/ACTUAL_COMPLETION.json')
+    for name in ('ORDERS.csv','FILLS.csv','ACCOUNT_EVENTS.csv','SETTLEMENTS.csv','FINANCIAL_EVIDENCE.json'):
+        if not (ROOT/'final'/('Q1_B_DURABLE_'+name)).is_file():
+            raise ValueError('DURABLE_FINANCIAL_EVIDENCE_REQUIRED:'+name)
     recheck_inputs_and_execution()
     if (ROOT/'STORAGE_MIGRATION_COPY.json').exists():
         recheck_sealed_storage_source(ROOT/'STORAGE_MIGRATION_COPY.json',ROOT/'final/STORAGE_COPY_SOURCE_PRESERVATION_FINAL.json')
@@ -122,6 +125,7 @@ def run():
     add(REPO/'tests/test_ben_b1_2_report_support.py','code/tests/test_ben_b1_2_report_support.py')
     add(REPO/'tests/test_ben_b1_2_package_preservation.py','code/tests/test_ben_b1_2_package_preservation.py')
     add(REPO/'tests/test_ben_b1_2_stop_reporting.py','code/tests/test_ben_b1_2_stop_reporting.py')
+    add(REPO/'tests/test_ben_b1_2_partial_financial_export.py','code/tests/test_ben_b1_2_partial_financial_export.py')
     add(REPO/'scripts/run_b12_continuation.py','code/scripts/run_b12_continuation.py')
     for folder in ('storage_revision3','query_revision4'):
         for p in (ROOT/'engineering'/folder).rglob('*.json'):

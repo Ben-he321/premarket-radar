@@ -11,7 +11,7 @@ from pathlib import Path
 import pandas as pd
 import pandas_market_calendars as mcal
 from src.ben_b1.ledger import Ledger
-from src.ben_b1_2.compact import stream_hash
+from src.ben_b1_2.compact import stream_hash, _write_csv
 from .runtime import *
 from .report_support import coverage_summary,verified_benchmarks
 from .query_check import proof_matches_expected
@@ -146,6 +146,34 @@ def analyze(path,label,quarter=True):
 
 def write_csv(path,rows):
     pd.DataFrame(rows).to_csv(path,index=False,encoding='utf-8-sig')
+
+def export_durable_financial_evidence(directory,output):
+    """Read saved financial rows only; never instantiate or restore a replay engine."""
+    if read(ROOT/'RUNNER_PROCESS.json')['status']!='STOPPED':
+        raise ValueError('WRITER_ACTIVE_NO_FINANCIAL_EXPORT')
+    directory=Path(directory);output=Path(output)
+    if output.resolve().is_relative_to(directory.resolve()):
+        raise ValueError('READ_ONLY_EXPORT_MUST_BE_OUTSIDE_ACCOUNT')
+    cp,proof=verified_checkpoint(directory);state=cp['state'];ledger=cp['ledger']['state']
+    tables={
+        'orders':(state['pending'],['order_id','symbol','side','quantity','status']),
+        'fills':(ledger['fills'],['fill_id','order_id','symbol','side','quantity','execution_price']),
+        'account_events':(ledger['events'],['type','date','amount']),
+        'settlements':(ledger['settlements'],['amount','settle_date']),
+    }
+    counts={}
+    for name,(values,fields) in tables.items():
+        rows=values.values() if isinstance(values,dict) else values
+        destination=output/('Q1_B_DURABLE_'+name.upper()+'.csv')
+        if destination.exists():raise ValueError('FINANCIAL_EXPORT_ALREADY_EXISTS')
+        _write_csv(destination,lambda rows=rows:iter(rows),fields);counts[name]=len(rows)
+    record={'at':utc(),'scope':'SAVED_PREFIX_ONLY_NOT_QUARTER_COMPLETION_OR_FULL_ARCHIVE_RESTORE',
+        'completed_day':state['b12_completed_day']['day'],'account_state_cutoff':state['at'],
+        'checkpoint_proof':proof,'financial_ledger':cp['ledger'],
+        'execution_financial_state':{name:state.get(name) for name in ('pending','stops','trailing','pressure','last_exit')},
+        'row_counts':counts,'events_executed':0,'sqlite_opened':False,'synthetic':False}
+    write(output/'Q1_B_DURABLE_FINANCIAL_EVIDENCE.json',record)
+    return record
 
 def money(v):return '未完成' if v is None else f'{v:,.2f}'
 
@@ -282,6 +310,7 @@ def run():
         'quarter_to_tail_equity_change':r['change_after_quarter_end']['equity'],'new_buys_in_tail':r['change_after_quarter_end']['buy_fills'],
         'new_sells_in_tail':r['change_after_quarter_end']['sell_fills'],'recovery':r['recovery'].get('status')} for r in tails])
     q=rows[-1];tail=tails[-1];complete=q['quarter_complete'] and tail['tail_complete'] and evidence['status']=='PASS'
+    financial_evidence=export_durable_financial_evidence(ACCOUNT,final)
     latest=read(ACCOUNT/'progress.json');last_error=read(ROOT/'STOP_RECORD.json') if (ROOT/'STOP_RECORD.json').exists() else None
     planned=read(ROOT/'FINAL_TIME_BOUNDARY_STOP.json') if (ROOT/'FINAL_TIME_BOUNDARY_STOP.json').exists() else None
     stop=current_stop_record(state,last_error,planned)
@@ -308,6 +337,7 @@ def run():
         query_stop=read(ROOT/'PLANNED_QUERY_FIX_STOP.json');query_backup=read(ROOT/'engineering/QUERY_FIX_FULL_BACKUP.json')
         text += ['',f"归档查询续修：第三次尝试已保存至{query_stop['actual_committed_day']}，于{query_stop['stopped_at']}计划停下；当时没有资源错误，Jan26未提交。完整同账户恢复副本{query_backup['file_count']}文件、{query_backup['bytes']}字节逐文件核对PASS。实际库查询计划显示原冲突检查扫描全部旧归档，现仅固定新批次为外层，保留相同ID、digest及代际冲突判断；84项工程回归、固定真实密集样本及中断重放分别保存，非新增策略实验。保存前缀实际全量恢复={evidence['query_fix_prefix_restore']['status']}，证明内容关联={evidence['query_fix_proof_binding']}。"]
     text += ['',f"恢复入口：{REPO/'scripts/run_b12_continuation.py'}，使用既有ai-m1虚拟环境。该入口仅为进程设置D盘TEMP/TMP，再读取本轮ENGINEERING_GATE和同一私有检查点，拒绝从头初始化。授权硬截止{DEADLINE}；截止后需新一轮明确授权。",
+        '', f"逐笔证据：Q1_B_DURABLE文件从同一已保存检查点只读提取订单、成交、账户事件、未结算款及财务/止损状态，共{financial_evidence['row_counts']}。截止时间{financial_evidence['account_state_cutoff']}；不含尚未保存的当天事件，不代表完整季度或最新检查点全归档恢复已PASS。",
         '', '验证包不包含密钥、原始行情、Parquet、完整检查点、SQLite、WAL、SHM或私有全量备份。完整私有恢复副本仍留在本地。']
     (final/'BEN_B1_2_CONTINUATION_RESULTS.md').write_text('\n'.join(text)+'\n',encoding='utf-8')
     write(final/'ACTUAL_COMPLETION.json',{'at':utc(),'full_quarter_and_tail_complete':complete,'quarter_complete':q['quarter_complete'],'tail_complete':tail['tail_complete'],
