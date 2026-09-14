@@ -173,13 +173,14 @@ def package(sample_version,portfolio_version):
         'validate_completed_accounts.py','DELIVERY_VALIDATION_SAMPLES38.json',
         'extract_partial_checkpoint.py','PARTIAL_EXTRACTOR.md','PARTIAL_EXTRACTOR_TESTS.json',
         'PARTIAL_EXTRACTOR_TESTS_BEFORE_PORTABILITY.json','SOURCE_MANIFEST_BEFORE_REPORT_HELPER.json',
-        'SAMPLE_RESOURCE_OBSERVATION_20260914T093853Z.json'}
+        'SAMPLE_RESOURCE_OBSERVATION_20260914T093853Z.json','FEED_CACHE_REVIEW.json',
+        'SAMPLE_REPORT_REASON_CLEANUP_VERIFICATION.json'}
     for stem in ['all_b1_b12','all_b1_b12_compact','b11_regression','compact_initial','compact_expanded','compact_final',
         'data_initial','portfolio_initial','q1_initial','q1_expanded','samples_initial','pytest_benchmarks','pytest_earnings','pytest_delivery','final_regression',
         'shared_cash_mark_boundary_initial','shared_cash_boundary_final','final_recovery_boundary_initial','final_recovery_boundary_final','day_progress_boundary_final',
         'final_regression_before_delivery_fixture_review','acquisition_prefilter','pre_acquisition_final_regression',
         'acquisition_equivalence','acquisition_before_shorter_tmp_name','delivery_validation','delivery_validation_samples38',
-        'partial_extractor','partial_extractor_before_portability']:
+        'partial_extractor','partial_extractor_before_portability','feed_cache_regression','sample_diagnostics_regression']:
         engineering_names.update({stem+'.log',stem+'.xml'})
     zones={'engineering':engineering_names,
        'quality':{'HISTORICAL_QUERY_MAPPING.csv','INPUT_HASHES.json','MARKET_OBJECT_QUALITY.csv','NOW_SPLIT_UNIT_REVIEW.json','QUALITY_SUMMARY.json'},

@@ -31,7 +31,7 @@ class B12Market(B11Market):
         for prior in self.previous:
             p=prior.get('params',{})
             if (prior.get('symbol')!=symbol or prior.get('kind')!=kind or not prior.get('complete')
-                or p.get('symbols')!=kwargs.get('query_symbol',symbol)):
+                or p.get('symbols')!=kwargs.get('query_symbol',symbol) or p.get('feed')!='sip'):
                 continue
             if kind=='bars' and (p.get('adjustment')!=adjustment or p.get('timeframe')!=timeframe):continue
             if pd.Timestamp(p['start'])>pd.Timestamp(start) or pd.Timestamp(p['end'])<pd.Timestamp(end):continue

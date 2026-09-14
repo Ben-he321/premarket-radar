@@ -33,7 +33,7 @@ def old_cache(tmp_path, query="SATS", empty=False):
     if not empty:
         bars().to_parquet(target / "data.parquet", index=False)
     return {"symbol": "ECHO", "kind": "bars", "complete": True, "rows": 0 if empty else 3,
-            "path": str(target), "params": {"symbols": query, "start": "2026-01-01T00:00:00Z",
+            "path": str(target), "params": {"symbols": query, "feed": "sip", "start": "2026-01-01T00:00:00Z",
                 "end": "2026-01-06T23:59:59Z", "adjustment": "raw", "timeframe": "1Day"}}
 
 
@@ -106,6 +106,48 @@ def test_parent_request_failure_restores_cache_index_without_writing_old_file(mo
     assert market.previous is original and digest(old_file) == before
 
 
+@pytest.mark.parametrize("kind", ["bars", "quotes"])
+@pytest.mark.parametrize("feed", ["sip", "iex", None, "MISSING"])
+def test_cache_feed_must_be_explicit_sip_without_legacy_fallback(monkeypatch, tmp_path, kind, feed):
+    prior = old_cache(tmp_path)
+    prior["kind"] = kind
+    if feed == "MISSING":
+        prior["params"].pop("feed")
+    else:
+        prior["params"]["feed"] = feed
+    source = Path(prior["path"]) / "data.parquet"
+    expected = bars()
+    if kind == "quotes":
+        expected = pd.DataFrame([{"t": "2026-01-02T21:05:00Z", "bp": 10., "ap": 10.01,
+            "bs": 100, "as": 100, "quote_id": "MOCK_IMMUTABLE_SIP_QUOTE", "source_received_at": "MOCK_DOWNLOAD_TIME"}])
+        expected.to_parquet(source, index=False)
+    before = (digest(source), source.stat().st_mtime_ns)
+    market = market_without_credentials(monkeypatch, [prior])
+    calls = []
+    def fresh_sip(self, symbol, start, end, actual_kind, adjustment, timeframe, scope, **kwargs):
+        assert self.previous == []  # Parent cannot accept the rejected cache through its looser matcher.
+        assert feed != "sip"
+        calls.append(actual_kind)
+        return expected.copy(), {"path": str(tmp_path / "MOCK_NEW_SIP_ONLY"), "complete": True,
+                                 "params": {"feed": "sip"}, "mock_provider_only": True}
+    monkeypatch.setattr(data.B11Market, "acquire", fresh_sip)
+    original_read = pd.read_parquet
+    def read_only_sip(path, *args, **kwargs):
+        assert feed == "sip", "Rejected source must not even be read as research input"
+        return original_read(path, *args, **kwargs)
+    monkeypatch.setattr(pd, "read_parquet", read_only_sip)
+    result, receipt = market.acquire("ECHO", pd.Timestamp("2026-01-02T00:00:00Z"),
+        pd.Timestamp("2026-01-02T23:59:59Z"), kind=kind, timeframe="1Day", query_symbol="SATS")
+    assert len(result) > 0 and receipt["params"]["feed"] == "sip"
+    assert before == (digest(source), source.stat().st_mtime_ns)
+    if feed == "sip":
+        assert calls == [] and receipt["old_cache_reused_read_only"] is True
+        assert len(market.state["cache_reuse_records"]) == 1
+    else:
+        assert calls == [kind] and market.state["cache_reuse_records"] == []
+        assert receipt["mock_provider_only"] is True
+
+
 def test_restarting_completed_local_quote_cache_preserves_quote_id_bytes_and_mtime(monkeypatch, tmp_path):
     output = tmp_path / "LOCAL_SAMPLE_QUOTES"
     cached = output / "cache/MOCK_CACHE_KEY"
@@ -117,7 +159,7 @@ def test_restarting_completed_local_quote_cache_preserves_quote_id_bytes_and_mti
     frame.to_parquet(source, index=False)
     before = (digest(source), source.stat().st_mtime_ns)
     prior = {"symbol": "ECHO", "kind": "quotes", "complete": True, "rows": 1, "path": str(cached),
-             "params": {"symbols": "SATS", "start": "2026-01-02T21:04:55Z", "end": "2026-01-02T21:15:00Z"}}
+             "params": {"symbols": "SATS", "feed": "sip", "start": "2026-01-02T21:04:55Z", "end": "2026-01-02T21:15:00Z"}}
     def fake_init(self, destination):
         self.previous = []
         self.state = {"requests": [prior], "cache_reuse_records": []}

@@ -23,6 +23,17 @@ def _known(value):
     return value is not None and not (isinstance(value, float) and pd.isna(value))
 
 
+def _reasons(table):
+    if not len(table):
+        return [], []
+    observed = list(dict.fromkeys(table.reason.dropna().astype(str)))
+    # An already fixed intent or a currently held position is an observation,
+    # not an entry failure. Preserve every source reason separately.
+    failures = table[~table.status.isin(["HOLDING", "INTENT_EXISTS", "INTENT_CREATED", "WATCHING"])]
+    failed = list(dict.fromkeys(failures.reason.dropna().astype(str)))
+    return observed, failed
+
+
 def build(version="initial_v1", output=None):
     output = Path(output) if output else ROOT/"samples"/version/"comparison"
     output.mkdir(parents=True, exist_ok=True)
@@ -57,9 +68,7 @@ def build(version="initial_v1", output=None):
             if len(bad):
                 bad = bad[~bad.status.isin(["HOLDING", "INTENT_EXISTS", "INTENT_CREATED"])]
             bad_reasons = list(dict.fromkeys(bad.reason.dropna().astype(str))) if len(bad) else []
-            all_reasons = list(dict.fromkeys(q1_evaluations.reason.dropna().astype(str))) if len(q1_evaluations) else []
-            if not all_reasons and len(q1_decisions):
-                all_reasons = list(dict.fromkeys(q1_decisions.reason.dropna().astype(str)))
+            all_reasons, failed_reasons = _reasons(q1_evaluations if len(q1_evaluations) else q1_decisions)
             buys = q1_orders[q1_orders.side.eq("BUY")] if len(q1_orders) else pd.DataFrame()
             complete = bool(q1.get("sample_run_complete"))
             if not complete:
@@ -92,7 +101,8 @@ def build(version="initial_v1", output=None):
                 "first_all_rule_pass_time": first_create.get("decision_time"), "actual_intention_time": first_intent,
                 "first_bad_reason": bad_reasons[0] if bad_reasons else None,
                 "first_bad_reasons": json.dumps(bad_reasons, ensure_ascii=False),
-                "whole_window_reason": result, "whole_window_failed_checks": json.dumps(all_reasons, ensure_ascii=False),
+                "whole_window_reason": result, "whole_window_failed_checks": json.dumps(failed_reasons, ensure_ascii=False),
+                "whole_window_observed_reasons": json.dumps(all_reasons, ensure_ascii=False),
                 "Q1_status": q1.get("status", "NOT_COMPLETED_OR_NOT_RUN"), "Q1_buy_intents": q1.get("buy_intents"),
                 "Q1_coverage_status": q1.get("coverage_status", "NOT_DECLARED_OR_NOT_RUN"),
                 "Q1_data_unknown_decision_count": q1.get("data_unknown_decision_count"),
