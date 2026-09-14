@@ -22,9 +22,9 @@ def test_activity_uses_ny_quarter_dates_and_excludes_warmup_and_tail(tmp_path):
     """Mock exported fills only; this does not run a strategy or market client."""
     put(tmp_path / 'fills.csv',
         'at,symbol,side,quantity\n'
-        '2026-01-01T21:05:00Z,MOCK,BUY,99\n'
-        '2026-01-02T21:05:00Z,MOCK,BUY,2\n'
-        '2026-04-01T00:10:00Z,MOCK,SELL,1\n'
+        '2026-01-01T21:05:00+00:00,MOCK,BUY,99\n'
+        '2026-01-02T21:05:00+00:00,MOCK,BUY,2\n'
+        '2026-04-01T00:10:00.123456789+00:00,MOCK,SELL,1\n'
         '2026-04-01T14:00:00Z,MOCK,SELL,1\n')
     result = delivery.audit_account(tmp_path)
     assert result['trading_activity'] == [{'symbol': 'MOCK', 'buy_dates': ['2026-01-02'],
@@ -116,6 +116,7 @@ def test_partial_finance_is_visible_without_terminal_or_recovery_claim(isolated_
     assert row['partial_evidence']['saved_interim_cash_not_terminal_result']==4200
     assert row['quarter_end_equity'] is None and row['quarter_profit'] is None
     assert row['actually_completed'] is False and row['recovery']=='NOT_VERIFIED'
+    assert row['one_shared_initial_5500'] is None
     assert not (account/'FINAL_ACCOUNT.json').exists()
 
 
@@ -150,6 +151,13 @@ def test_nonexistent_fixed_account_is_not_run_and_cash_not_invented(tmp_path):
     row=delivery.audit_account(tmp_path/'NEVER_STARTED')
     assert row['status']=='NOT_RUN' and row['processed_through'] is None
     assert row['quarter_cash'] is None and row['quarter_end_equity'] is None
+
+
+@pytest.mark.parametrize('values,expected',[
+    ([True,True,True,True],True),([True,True,True,None],None),
+    ([True,False,True,None],False),([True,True,True],None)])
+def test_shared_capital_attestation_keeps_unverified_distinct_from_disproved(values,expected):
+    assert delivery.shared_capital_evidence([{'one_shared_initial_5500':v} for v in values]) is expected
 
 
 def test_interim_close_is_dated_separately_and_stale_marks_never_become_quarter_nav(tmp_path):
