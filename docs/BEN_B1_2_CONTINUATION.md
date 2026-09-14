@@ -1,0 +1,37 @@
+# B1.2 有界工程续作
+
+本轮从原 `B12_Q1_P50_B_compact_base_v1` 的2026-01-22检查点继续，保留原账户、意图、成本、止损腿、报价库存及事件标识。原本金仍为5500美元，Jan22现金87.92美元，BE27股、NVDA14股。6607.69美元是原轮次的中途收盘估值，不是季度最终成绩。
+
+本轮授权自2026-09-14 15:46:08 UTC起，至23:46:08 UTC结束，最多8小时。只延续Q1/B；Q0/A、Q1/A、Q0/B直接引用原结果和恢复PASS。无新参数、策略、账户、付费服务、模型调用或券商接口。
+
+## 隔离与恢复
+
+工作目录：`C:/Users/benhe/OneDrive/Documentos/GITHUB/premarket-radar-ben-b1-2-resume`。
+
+输出目录：`C:/Users/benhe/BenAITradingData/ben-b1-2-continuation-20260914T154608Z`。
+
+`private_backup/full_inactive_recovery.zip`包含原账户全部10个文件，包括checkpoint、SQLite、WAL及SHM；备份时原回放进程不存在，复制前后原文件SHA、大小及修改时间一致，解压副本逐文件SHA一致。原目录及归档不删除、不覆盖。副本仅重定位归档路径并重算检查点包装哈希，其他所有状态逐项验证。
+
+SQLite仅在工作副本中运行，正常关闭会处理副本WAL；不能将单独主数据库称为完整备份。私有完整备份及行情、数据库不进入公开验证包。
+
+新的行级事件排序使用临时SQLite，精确排序键为UTC纳秒、原事件优先级、Unicode事件ID及原输入序号。分批边界不触发决策；同时间戳报价批次及原before/late逻辑段边界保持。报价加载使用Arrow分批，原始完整数据及所有页面哈希均保留。原归档块的哈希逐键流式计算，仍执行SQLite完整完整性检查。归档暂存避免一次建立整个块的报价字典。
+
+QUOTE回滚仅复用经检查不会在报价处理中改变的状态分支，完整账本和可变交易状态仍备份；其他事件的回滚逻辑不变。纽约日期和常规时段的缓存仅针对当前完整时间戳。内存中本逻辑段的已处理事件及库存仍会增长，不能宣称所有状态均为常数内存；资源阈值与真实运行阶段峰值另存证据。
+
+## 放行条件与证据
+
+`ENGINEERING_GATE.json`只有在完整原检查点恢复、真实密集行情对等、真实归档提交后中断恢复、重复事件幂等及工程测试通过后生成，并固定证据及执行源文件SHA。未经门禁不得执行Jan23新事件。
+
+- `engineering/REAL_PREFIX_RESTORE.json`：5602986个已归档事件、全部36代及5576918条归档库存完整核验；现金、持仓、费用、订单、预留、结算、止损及最后事件逐项一致。
+- `engineering/DENSE_REAL_EQUIVALENCE.json`：既有MRVL590924事件、9个逻辑段，所有payload/state组件与旧引擎相同，归档只排除实际路径差异。
+- `engineering/REAL_DENSE_CRASH_RECOVERY.json`：真实179253事件块在归档提交、检查点提交前中断，旧检查点保真恢复、未声明代精确重放，全部事件重复后无状态变化。
+- `engineering/REAL_DENSE_INPUT_EQUIVALENCE_v2.json`：NVDA Jan23共1792943条、180页真实输入逐字段对照，含报价ID和接收时间，997/4096分批事件摘要一致。此项仅读数据，不提前执行账户新日期。
+- `engineering/final_engine_gate_v2.xml`：明确标记的临时mock测试，包括现金承诺、报价消耗、异常回滚、跨纳秒/时区排序、可选字段全局类型和资源中断。
+
+旧未知历史接收时间仍为UNKNOWN。Basic SIP及原财报分层保持，不切换数据源，不把回顾性B层财报排除当作完整PIT证据。为共同API配额继续使用原共享限速器 `.runtime/alpaca-rate.sqlite`；它是运行限流元数据，原M20/U服务与账本不修改或重启。
+
+## 状态与恢复入口
+
+`TASK_STATE.json`、`LIVE_PROGRESS.json`、`RESOURCE_PROFILE.jsonl`和`RUNNER_PROCESS.json`记录实际进程、阶段、资源及完成日。主执行者使用进程锁，禁止同一续作并发启动。恢复入口为 `python -B -m src.ben_b1_2_continuation.runner`，使用既有ai-m1虚拟环境。该入口要求已存在且通过验证的检查点与报告游标；无法恢复时拒绝重新初始化。
+
+最低可用内存800MiB、可用磁盘2GiB或本轮硬截止任一触发则保留检查点、归档、输入与错误记录并停止。不能将停止前的日期或收益声称为完整季度。原轮次停止时间、原因和未完成状态保持不变；续作结果单独记录。

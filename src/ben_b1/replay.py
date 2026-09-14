@@ -906,6 +906,9 @@ class ReplayEngine:
         self.state["equity"].append(_clean(snap))
         return snap
 
+    def _rollback_state(self, kind, heavy):
+        return copy.deepcopy({k: v for k, v in self.state.items() if k not in heavy})
+
     def process(self, event: dict) -> dict:
         e = _clean(copy.deepcopy(event))
         for key in ("event_id", "kind", "at"):
@@ -932,7 +935,7 @@ class ReplayEngine:
         # Undo snapshots cover precisely the mutable collections this event may
         # touch. Copying all past quotes/minutes per tick would be quadratic.
         heavy = {"bars", "minutes", "quote_inventory", "trace", "handled", "equity", "decisions", "errors", "gaps", "repairs"}
-        backup = copy.deepcopy({k: v for k, v in self.state.items() if k not in heavy})
+        backup = self._rollback_state(kind, heavy)
         lengths = {k: len(self.state[k]) for k in ("trace", "equity", "decisions", "errors", "gaps")}
         missing = object()
         bar_backup = copy.deepcopy(self.state["bars"].get(symbol, {})) if kind in ("DAILY_BAR", "SPLIT") else None
