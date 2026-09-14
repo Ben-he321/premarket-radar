@@ -36,7 +36,7 @@ def quote_events(symbol,frame,receipt):
     return result
 
 class ContinuousInputs:
-    def __init__(self,earnings_path):
+    def __init__(self,earnings_path,market=None):
         self.schedule=mcal.get_calendar('NYSE').schedule('2025-01-01','2026-12-31')
         self.clocks={str(d.date()):r for d,r in self.schedule.iterrows()}
         self.scope=pd.read_csv(B1/'UNIVERSE_POLICY.csv')
@@ -47,7 +47,7 @@ class ContinuousInputs:
         self.earnings_path=Path(earnings_path);self.earnings=read(self.earnings_path)
         self.actions=read(DATA/'corporate_actions.json')
         self.pinned={str(p):sha(p) for p in [B1/'UNIVERSE_POLICY.csv',DATA/'HISTORY_INPUTS.json',self.earnings_path,DATA/'corporate_actions.json',ROOT/'B12_PROTOCOL.json']}
-        self.daily={};self.coverage=[];self.market=B12Market(DATA/'portfolio_quotes')
+        self.daily={};self.coverage=[];self.market=market if market is not None else B12Market(DATA/'portfolio_quotes')
         rank=pd.read_csv(B11/'data/RANKING_VOLUME_PRIOR20.csv')
         for symbol,u in self.universe.items():
             h=self.histories.get(symbol,{})
