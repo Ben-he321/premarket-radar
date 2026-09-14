@@ -1,0 +1,82 @@
+"""Public whitelist only, with original immutable evidence preservation QA."""
+import hashlib
+import zipfile
+from pathlib import Path
+from .runtime import *
+
+ACCOUNT_FILES=['RUN_SPEC.json','progress.json','COMMON_CLOCK.json','QUOTE_COVERAGE.json','CLOSE_VALUATIONS.json',
+    'DYNAMIC_INPUT_HASHES.json','QUARTER_END_ACCOUNT.json','QUARTER_END_LEDGER.json','QUARTER_END_CLOSE_VALUATION.json',
+    'FINAL_ACCOUNT.json','RECOVERY_IDEMPOTENCY.json','ARCHIVE_MANIFEST.json','summary.json',
+    'orders.csv','fills.csv','campaigns.csv','account_events.csv','data_gaps.csv','daily_equity.csv','continuous_close_equity.csv','event_trace.csv']
+
+def run():
+    if read(ROOT/'RUNNER_PROCESS.json')['status']!='STOPPED':raise ValueError('NO_PACKAGE_WHILE_WRITER_ACTIVE')
+    if not (ROOT/'final/ACTUAL_COMPLETION.json').exists():raise ValueError('FINAL_RECONCILIATION_REQUIRED')
+    manifest={};missing=[];protected=[]
+    before=read(ROOT/'ORIGINAL_ACCOUNT_BEFORE.json')
+    for relative,expected in before.items():
+        p=SOURCE_ACCOUNT/relative
+        ok=p.exists() and sha(p)==expected['sha256'] and p.stat().st_size==expected['bytes'] and p.stat().st_mtime_ns==expected['mtime_ns']
+        protected.append({'path':str(p),'unchanged':ok})
+    for account,files in read(ROOT/'COMPLETED_THREE_PRESERVATION_BEFORE.json').items():
+        for path,expected in files.items():
+            p=Path(path);ok=p.exists() and sha(p)==expected['sha256'] and p.stat().st_size==expected['bytes'] and p.stat().st_mtime_ns==expected['mtime_ns']
+            protected.append({'path':str(p),'unchanged':ok})
+    preservation={'at':utc(),'status':'PASS' if all(r['unchanged'] for r in protected) else 'FAIL','checked_files':len(protected),'files':protected}
+    write(ROOT/'final/OLD_ACCOUNT_PRESERVATION_FINAL.json',preservation)
+    if preservation['status']!='PASS':raise ValueError('ORIGINAL_ACCOUNT_PRESERVATION_FAILED')
+    def add(path,name,required=True):
+        path=Path(path)
+        if not path.exists():
+            if required:missing.append(name)
+            return
+        lowered=str(path).lower()
+        if any(token in lowered for token in ('.streamlit','secrets.toml','/.env','\\.env')) or path.suffix.lower() in ('.sqlite','.db','.parquet','.wal','.shm') or 'checkpoint' in path.name.lower() or path.name.endswith(('-wal','-shm')):
+            raise ValueError('FILE_OUTSIDE_PUBLIC_WHITELIST:'+name)
+        manifest[name]={'path':str(path),'bytes':path.stat().st_size,'sha256':sha(path)}
+    for p in (ROOT/'final').iterdir():
+        if p.is_file() and p.suffix in ('.md','.json','.csv'):add(p,'results/'+p.name)
+    for name in ['AUTHORIZATION.json','BACKUP_VERIFICATION.json','ENGINEERING_GATE.json','CODE_DELIVERY.json',
+        'CONTINUATION_RUN_SPEC.json','TASK_STATE.json','LIVE_PROGRESS.json','RUNNER_PROCESS.json','RESOURCE_PROFILE.jsonl','STAGE_LOG.jsonl',
+        'M20_U_PROCESS_PRESERVATION_BEFORE_RESUME.json','M20_U_PROCESS_PRESERVATION_AFTER.json','STOP_RECORD.json']:
+        add(ROOT/name,'continuation/'+name,required=name!='STOP_RECORD.json')
+    for p in (ROOT/'engineering').iterdir():
+        if p.is_file() and p.suffix in ('.json','.xml','.md','.log','.txt'):
+            add(p,'engineering/'+p.name)
+    for mode in ('dense_original','dense_bounded'):
+        for name in ('BLOCK_PROOFS.json','ENGINEERING_RUN.json','first10000_real_quotes_profile.txt'):
+            add(ROOT/'engineering'/mode/name,'engineering/'+mode+'/'+name,required=name!='first10000_real_quotes_profile.txt')
+    for label,code in [('Q0_A','Q0_P50_A'),('Q1_A','Q1_P50_A'),('Q0_B','Q0_P50_B'),('Q1_B','Q1_P50_B')]:
+        path=ACCOUNT if label=='Q1_B' else OLD/'portfolio/compact_base_v1'/('B12_'+code+'_compact_base_v1')
+        for name in ACCOUNT_FILES:add(path/name,'accounts/'+label+'/'+name,required=False)
+    for name in ['BENCHMARKS.md','RUN_SPEC.json','SUMMARY.json','INPUT_MANIFEST.json','RTH_OPEN_VERIFICATION.json','COMPLETE.json']:
+        add(OLD/'benchmarks/frozen_v1'/name,'existing/benchmarks/'+name)
+    for symbol in ('SPY','QQQ'):
+        for name in ('ACCOUNT.json','daily.csv','fills.csv','dividends.csv','cashflows.csv','order_decisions.csv'):
+            add(OLD/'benchmarks/frozen_v1'/symbol/name,'existing/benchmarks/'+symbol+'/'+name)
+    for name in ('BEN_B1_2_RESULTS.md','B12_PROTOCOL.json'):
+        add(OLD/name,'existing/original_B1_2/'+name)
+    for p in (REPO/'src/ben_b1_2_continuation').glob('*.py'):add(p,'code/src/ben_b1_2_continuation/'+p.name)
+    for p in (REPO/'docs/BEN_B1_2_CONTINUATION.md',REPO/'tests/test_ben_b1_2_continuation.py'):
+        add(p,'code/'+str(p.relative_to(REPO)).replace('\\','/'))
+    dest=ROOT/'verification_ben_b1_2_window_portfolio_bundle.zip'
+    if dest.exists():raise ValueError('NEW_ROUND_BUNDLE_ALREADY_EXISTS_NO_SILENT_OVERWRITE')
+    index={'at':utc(),'entries':manifest,'missing_required':missing,'old_bundle_preserved_at':str(OLD/dest.name),
+        'excluded':['all market Parquet and raw pages','complete checkpoints','SQLite/WAL/SHM','private full recovery backup','credentials'],
+        'private_initial_backup':str(ROOT/'private_backup/full_inactive_recovery.zip')}
+    write(ROOT/'PUBLIC_BUNDLE_MANIFEST.json',index)
+    with zipfile.ZipFile(dest,'w',zipfile.ZIP_DEFLATED,compresslevel=6) as z:
+        for name,item in manifest.items():z.write(item['path'],name)
+        z.write(ROOT/'PUBLIC_BUNDLE_MANIFEST.json','PUBLIC_BUNDLE_MANIFEST.json')
+    with zipfile.ZipFile(dest) as z:
+        bad=z.testzip()
+        if bad:raise ValueError('ZIP_CRC_FAILED:'+bad)
+        for name,item in manifest.items():
+            with z.open(name) as f:actual=hashlib.file_digest(f,'sha256').hexdigest()
+            if actual!=item['sha256']:raise ValueError('ZIP_CONTENT_HASH_FAILED:'+name)
+    delivery={'at':utc(),'zip':str(dest),'bytes':dest.stat().st_size,'sha256':sha(dest),'entries':len(manifest)+1,
+        'all_whitelisted_contents_hash_verified':True,'missing_required':missing,'original_account_preservation':'PASS',
+        'full_quarter_and_tail_complete':read(ROOT/'final/ACTUAL_COMPLETION.json')['full_quarter_and_tail_complete']}
+    write(ROOT/'DELIVERY.json',delivery);print(delivery,flush=True)
+
+if __name__=='__main__':run()
