@@ -149,6 +149,14 @@ def write_csv(path,rows):
 
 def money(v):return '未完成' if v is None else f'{v:,.2f}'
 
+def current_stop_record(process,last_error,planned):
+    candidates=[];started=process.get('started_at')
+    if not started:return None
+    if last_error and last_error['at']>=started:candidates.append(last_error)
+    if planned and planned.get('runner_started_at')==started and planned.get('runner_pid')==process.get('pid') and planned['at']>=started:
+        candidates.append(planned)
+    return max(candidates,key=lambda r:datetime.fromisoformat(r['at'])) if candidates else None
+
 def recovery_matches_checkpoint(recovery,proof):
     digest=(proof or {}).get('wrapper_sha256')
     return bool(digest and (proof or {}).get('hash_verified') and recovery.get('status')=='PASS'
@@ -214,7 +222,7 @@ def run():
             v['minimum_free_memory_mib']=min(v['minimum_free_memory_mib'],r['free_memory_mib'])
             v['minimum_free_disk_bytes']=min(v['minimum_free_disk_bytes'],r['free_disk_bytes'])
             global_peak=max(global_peak,r['peak_rss_mib'])
-    error_samples=list(ROOT.glob('STOP_RECORD*.json'))+list((ROOT/'attempts').rglob('STOP_RECORD*.json'))+list(ROOT.glob('PLANNED_STORAGE_STOP.json'))
+    error_samples=list(ROOT.glob('STOP_RECORD*.json'))+list((ROOT/'attempts').rglob('STOP_RECORD*.json'))+list(ROOT.glob('PLANNED_STORAGE_STOP.json'))+list(ROOT.glob('FINAL_TIME_BOUNDARY_STOP.json'))
     for path in error_samples:
         recorded=read(path).get('process_memory') or {}
         global_peak=max(global_peak,recorded.get('peak_rss_mib',0))
@@ -275,7 +283,8 @@ def run():
         'new_sells_in_tail':r['change_after_quarter_end']['sell_fills'],'recovery':r['recovery'].get('status')} for r in tails])
     q=rows[-1];tail=tails[-1];complete=q['quarter_complete'] and tail['tail_complete'] and evidence['status']=='PASS'
     latest=read(ACCOUNT/'progress.json');last_error=read(ROOT/'STOP_RECORD.json') if (ROOT/'STOP_RECORD.json').exists() else None
-    stop=last_error if last_error and last_error['at']>=state.get('started_at','') else None
+    planned=read(ROOT/'FINAL_TIME_BOUNDARY_STOP.json') if (ROOT/'FINAL_TIME_BOUNDARY_STOP.json').exists() else None
+    stop=current_stop_record(state,last_error,planned)
     outcome='完整季度与4月尾段已完成并恢复PASS。' if complete else ('Q1/B完整季度已核对；4月尾段或最终工程验收尚未全部完成，二者分别列示。' if q['quarter_complete'] else '本轮未完成可验收的完整季度，不能给出Q1/B完整季度成绩。')
     text=['# B1.2 Q1/B续作结果','',outcome,'',
         f"原账户保持不变。本轮最后完成日期：{latest['processed_day']}。原2026-01-22的6607.69美元仍是中途快照，未覆盖成最终成绩。",'',

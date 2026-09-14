@@ -116,9 +116,12 @@ def run():
     for name in ('STORAGE_WAIT_BOUNDARY_20260914T1846Z.json','migration_watch.log','continuation_runner_02.log','continuation_runner_03.log'):
         add(ROOT/name,'continuation/'+name)
     for p in ROOT.glob('continuation_runner_*.log'):add(p,'continuation/'+p.name)
+    for name in ('DELIVERY_TIME_RESERVE.json','FINAL_TIME_BOUNDARY_STOP.json'):
+        add(ROOT/name,'continuation/'+name,required=False)
     for p in (REPO/'tests').glob('test_ben_b1_2_storage_*.py'):add(p,'code/tests/'+p.name)
     add(REPO/'tests/test_ben_b1_2_report_support.py','code/tests/test_ben_b1_2_report_support.py')
     add(REPO/'tests/test_ben_b1_2_package_preservation.py','code/tests/test_ben_b1_2_package_preservation.py')
+    add(REPO/'tests/test_ben_b1_2_stop_reporting.py','code/tests/test_ben_b1_2_stop_reporting.py')
     add(REPO/'scripts/run_b12_continuation.py','code/scripts/run_b12_continuation.py')
     for folder in ('storage_revision3','query_revision4'):
         for p in (ROOT/'engineering'/folder).rglob('*.json'):
