@@ -27,6 +27,11 @@ def usd(x):return '未知／未完成' if numeric(x) is None else f'{float(x):,.
 
 def pct(x):return '未知／未完成' if numeric(x) is None else f'{float(x)*100:.2f}%'
 
+
+def account_label(name):
+    parts=name.split('_')
+    return '/'.join(parts[1:4]) if len(parts)>=4 and parts[0]=='B12' else name
+
 PARTIAL_TABLE_NAMES={'orders','ledger_orders','fills','campaigns','account_events','decisions','daily_equity',
                      'positions','settlements','dividend_receivables','errors','data_gaps'}
 
@@ -163,15 +168,15 @@ def report(sample_version,portfolio_version):
       '| 账户 | 状态 | 实际处理至 | 季末权益 | 季度净盈亏 | 季度收益 | 最大回撤 | 季度买/卖成交笔数 | 实际参与股票 |',
       '|---|---|---|---:|---:|---:|---:|---|---|']
     for r in accounts:
-        lines.append(f'| {r["account"]} | {r["status"]} | {r["processed_through"] or "未运行／未完成"} | {usd(r["quarter_end_equity"])} | {usd(r["quarter_profit"])} | {pct(r["quarter_return"])} | {pct(r["quarter_max_drawdown"])} | {r["buy_fills"]}/{r["sell_fills"]} | {", ".join(r["traded_symbols"]) or "无已核实成交"} |')
+        lines.append(f'| {account_label(r["account"])} | {r["status"]} | {r["processed_through"] or "未运行／未完成"} | {usd(r["quarter_end_equity"])} | {usd(r["quarter_profit"])} | {pct(r["quarter_return"])} | {pct(r["quarter_max_drawdown"])} | {r["buy_fills"] if r["buy_fills"] is not None else "未知"}/{r["sell_fills"] if r["sell_fills"] is not None else "未知"} | {", ".join(r["traded_symbols"]) or "无已核实成交"} |')
     if not accounts:lines.append('| 四本共同账户 | NOT_RUN | 未完成 | 未完成 | 未完成 | 未完成 | 未完成 | 不以初始化5500充当回放 |')
     lines+=['','以上收益是该固定季度的累计收益，没有把三个月年化为稳定盈利结论。缺失任何期末价格或未完整走完季度时，权益/回撤保持未知。四本结果不能混合为一条策略曲线。','',
        '| 账户 | 季末现金 | 退出费预留 | 持仓市值 | 未结算 | 分红应收 | 已付佣金 | 模型摩擦 | 尾段现金 | 尾段剩余持仓 |',
        '|---|---:|---:|---:|---:|---:|---:|---:|---:|---|']
-    for r in accounts:lines.append(f'| {r["account"]} | {usd(r["quarter_cash"])} | {usd(r["quarter_reserved_exit_fees"])} | {usd(r["quarter_market_value"])} | {usd(r["quarter_unsettled_cash"])} | {usd(r["quarter_dividend_receivable"])} | {usd(r["commission_paid_through_quarter"])} | {usd(r["friction_paid_through_quarter"])} | {usd(r["tail_cash"])} | {", ".join(r["tail_positions"]) or "无／详见完成状态"} |')
+    for r in accounts:lines.append(f'| {account_label(r["account"])} | {usd(r["quarter_cash"])} | {usd(r["quarter_reserved_exit_fees"])} | {usd(r["quarter_market_value"])} | {usd(r["quarter_unsettled_cash"])} | {usd(r["quarter_dividend_receivable"])} | {usd(r["commission_paid_through_quarter"])} | {usd(r["friction_paid_through_quarter"])} | {usd(r["tail_cash"])} | {", ".join(r["tail_positions"]) or "无／详见完成状态"} |')
     lines+=['','一季度内实际参与的证券与纽约成交日期如下；尾段退出另保留在各本 fills.csv。缺少完成导出时不能把空表解释为零成交。','',
             '| 账户 | 证券 | 买入日期 | 卖出日期 | 买入/卖出股数 |','|---|---|---|---|---:|']
-    for r in activity:lines.append(f'| {r["account"]} | {r["symbol"]} | {", ".join(r["buy_dates"]) or "无"} | {", ".join(r["sell_dates"]) or "无"} | {r["buy_shares"]}/{r["sell_shares"]} |')
+    for r in activity:lines.append(f'| {account_label(r["account"])} | {r["symbol"]} | {", ".join(r["buy_dates"]) or "无"} | {", ".join(r["sell_dates"]) or "无"} | {r["buy_shares"]}/{r["sell_shares"]} |')
     if not activity:lines.append('| 以账户完成状态为准 | 尚无已核实的成交导出 | 未知或无成交 | 未知或无成交 | 不假设 |')
     partials=[r for r in accounts if r['partial_evidence']]
     if partials:
@@ -182,7 +187,7 @@ def report(sample_version,portfolio_version):
         for r in partials:
             p=r['partial_evidence'];bounds=p['saved_boundaries']
             f=pd.read_csv(Path(r['partial_evidence_path'])/'fills.csv')
-            lines.append(f'| {r["account"]} | {bounds["checkpoint_event_cutoff_at"]} | {bounds["latest_completed_trading_session_ny"]} | {usd(p["saved_interim_cash_not_terminal_result"])} | {int(f.side.eq("BUY").sum())}/{int(f.side.eq("SELL").sum())} | {p["recovery_validation"]} |')
+            lines.append(f'| {account_label(r["account"])} | {bounds["checkpoint_event_cutoff_at"]} | {bounds["latest_completed_trading_session_ny"]} | {usd(p["saved_interim_cash_not_terminal_result"])} | {int(f.side.eq("BUY").sum())}/{int(f.side.eq("SELL").sum())} | {p["recovery_validation"]} |')
     lines+=['','## 同期SPY/QQQ参照','',
       '同为5500美元，首个交易日RTH开盘模型买入，整数股、每实际订单1美元佣金及0.1%摩擦，现金零息。实际付款后下一交易日尝试一次整数股再投资；期末未付款分红列应收。raw账户与all复权总回报参考分开，基金净值已含管理费，不重复扣除；未计税费。','',
       '| 基准 | 状态 | 期末权益 | 净盈亏 | 期末现金 | 期末股数 | 分红应收 |','|---|---|---:|---:|---:|---:|---:|']
@@ -192,6 +197,7 @@ def report(sample_version,portfolio_version):
       f'66候选全部保留，原60 KEEP、5排除、1身份/范围UNKNOWN不变。60只已完成有界输入请求；57只一季度有价格，逐日价格资格记录为{capability["price_qualified_symbol_sessions"]}个证券日，不等于全部通过财报和报价门槛。',
       'QNT/SKHY在请求区间为空；XE只有尾段少量观察价格；INFQ及其他短历史按当时预热是否足够处理。首条可见价格不是已核实上市日期。SPCX尾段改名/缺价不自动补造；ECHO季度查询使用历史SATS身份。',
       '季度B层24只具有有界普通财报链，A层仅六份独立计划证据；其余未知继续禁止入场。WULF4/14初步财务公告已作为B层实际边界。MRNA初步公告链、BMNR等仍未知，普通季度链也未证明穷尽非定期财务公告。',
+      ('已完成A账户的去重归因：每本4026个证券日中，340个有基础信号；其中330个财报未知、3个处于已知财报禁持期、3个RTH口径未核实，仅4个通过A财报门。Q0四个报价不足；Q1的REZI两窗口响应为空，AAOI两窗口仍未通过价差/结构止损/净2R。详细来源与每证券日多原因见 engineering/A_ZERO_ENTRY_EXPLANATION.md 和同名JSON，重复报价不增加独立机会数。' if (ROOT/'engineering/A_ZERO_ENTRY_EXPLANATION.json').is_file() else 'A层零入场的细分证据以实际账户导出为准，未生成时不推断原因。'),
       'Finnhub精确配置入口仍缺 FINNHUB_API_KEY，接口权限未验证。准确位置为现有 premarket-radar-ai-m1/.streamlit/secrets.toml 顶层；本轮不要求重新填写已有Alpaca密钥，没有购买服务。',
       f'真实输入质量检查覆盖{quality["checked_objects"]}个对象、{quality["rows"]:,}行：重复{quality["duplicates"]}、无效OHLC {quality["invalid_ohlc"]}、缺失成交量{quality["missing_volume"]}。空响应、分钟无成交、停牌与接口失败不互相替代。',
       '排序成交量仅在原已核对竞价量的日期可用；未知不填零，价差完全并列又缺二级排序量时按原内核保留未知。NOW预热期5:1拆股在12/18生效边界换算旧历史单位，未来公司行动不提前作用。',
@@ -199,6 +205,7 @@ def report(sample_version,portfolio_version):
       '## 工程检查、保留和恢复','',
       f'初版完整L1记录触及本机16GB内存边界，因此保留初版并增加纯存储归档与流式导出。MRVL优化前后真实事件等价检查状态：{equality}。准确事件ID/摘要、重复处理和异常中断恢复的测试与失败修复记录见engineering；未获PASS时不得声称真实经济状态等价。',
       f'四本账户完成：{reconciliation["common_accounts_complete"]}；四本恢复校验全通过：{reconciliation["all_account_recovery_pass"]}。旧文件检查：{preserve["status"]}（{preserve["checked_files"]}项）。',
+      '工程验证以 engineering/FINAL_ENGINEERING_SUMMARY.json 及对应日志为准：一次完整回归240项通过；之后缓存、数据请求、诊断和部分证据交付边界按修改范围补测。新增与重复执行次数分别记录，不能把分批通过项数说成一次完整测试，也不能以mock工程测试代替真实历史验收。',
       '运行状态以TASK_STATE.json、samples/WORKER_STATE.json、账户progress.json及PID实际存在为准。恢复使用对应版本checkpoint和同目录replay_archive.sqlite，并核对动态输入哈希；先检查有没有同名进程，不能启动第二份相同账户。完整本地数据库不在验收ZIP内。','',
       '## 结论与下一步','',
       '本轮交付应区分：有真实模型成交的工程回放；全部条件不满足而零成交；数据未知导致无法评价；以及因错误/预算未完成的账户。具体状态和错误不以空表或初始化现金代替。',
@@ -225,18 +232,19 @@ def package(sample_version,portfolio_version):
         'compare_mrvl_compact.py','verify_q0_reuse.py','DELIVERY_VALIDATION.json','FINAL_ENGINEERING_SUMMARY.json',
         'ACQUISITION_PREFLIGHT_BEFORE.json','ACQUISITION_PREFLIGHT_VALIDATION.json','ACQUISITION_REVIEW.json',
         'validate_completed_accounts.py','DELIVERY_VALIDATION_SAMPLES38.json','DELIVERY_VALIDATION_SAMPLES40.json','DELIVERY_VALIDATION_A_STAGE.json',
+        'DELIVERY_VALIDATION_Q0_B_STAGE.json','validate_Q0_B_stage.py','PORTFOLIO_RESOURCE_OBSERVATION_20260914T112140Z.json',
         'extract_partial_checkpoint.py','PARTIAL_EXTRACTOR.md','PARTIAL_EXTRACTOR_TESTS.json',
         'PARTIAL_EXTRACTOR_TESTS_BEFORE_PORTABILITY.json','SOURCE_MANIFEST_BEFORE_REPORT_HELPER.json',
         'SAMPLE_RESOURCE_OBSERVATION_20260914T093853Z.json','FEED_CACHE_REVIEW.json',
         'SAMPLE_REPORT_REASON_CLEANUP_VERIFICATION.json','BENCHMARK_REAL_INPUT_RECONCILIATION.json','A_STAGE_PARTIAL_DELIVERY_REVIEW.md','validate_A_stage.py',
-        'BENCHMARK_REAL_INPUT_FINDINGS.md','REPORT_ONLY_SOURCE_BOUNDARY.json'}
+        'BENCHMARK_REAL_INPUT_FINDINGS.md','REPORT_ONLY_SOURCE_BOUNDARY.json','A_ZERO_ENTRY_EXPLANATION.json','A_ZERO_ENTRY_EXPLANATION.md'}
     for stem in ['all_b1_b12','all_b1_b12_compact','b11_regression','compact_initial','compact_expanded','compact_final',
         'data_initial','portfolio_initial','q1_initial','q1_expanded','samples_initial','pytest_benchmarks','pytest_earnings','pytest_delivery','final_regression',
         'shared_cash_mark_boundary_initial','shared_cash_boundary_final','final_recovery_boundary_initial','final_recovery_boundary_final','day_progress_boundary_final',
         'final_regression_before_delivery_fixture_review','acquisition_prefilter','pre_acquisition_final_regression',
         'acquisition_equivalence','acquisition_before_shorter_tmp_name','delivery_validation','delivery_validation_samples38',
         'partial_extractor','partial_extractor_before_portability','feed_cache_regression','sample_diagnostics_regression',
-        'delivery_validation_samples40','benchmarks_real_run','delivery_activity_regression','delivery_validation_A_stage','delivery_partial_regression']:
+        'delivery_validation_samples40','benchmarks_real_run','delivery_activity_regression','delivery_validation_A_stage','delivery_partial_regression','delivery_validation_Q0_B_stage']:
         engineering_names.update({stem+'.log',stem+'.xml'})
     zones={'engineering':engineering_names,
        'quality':{'HISTORICAL_QUERY_MAPPING.csv','INPUT_HASHES.json','MARKET_OBJECT_QUALITY.csv','NOW_SPLIT_UNIT_REVIEW.json','QUALITY_SUMMARY.json'},
