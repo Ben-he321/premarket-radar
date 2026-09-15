@@ -14,7 +14,7 @@ MARKETS = {
 
 PROTOCOL = {
     'version': 'F0-PILOT-20260915',
-    'source': 'User task Ben_F0_11500��Ԫ_��Ʒ���ڻ������븡ӯ�Ӳ�_С������_20260915.txt',
+    'source': 'User task Ben_F0_11500美元_多品种期货趋势与浮盈加仓_小测任务_20260915.txt',
     'capital_usd': 11500, 'warmup': ['2021-01-01', '2021-12-31'],
     'descriptive': ['2022-01-01', '2023-12-31'], 'evaluation': ['2024-01-01', '2025-12-31'],
     'markets': MARKETS, 'versions': ['F0', 'F1'],
