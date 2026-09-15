@@ -83,6 +83,15 @@ class QualifiedInputs:
         return spec
 
     def _bar(self, item):
+        # Model defaults are convenient for engineering fixtures. Production
+        # imports must never interpret omitted halt/limit evidence as tradable.
+        explicit = {'status', 'tradable_open', 'tradable_stop', 'session_verified', 'is_mock'}
+        if not explicit <= set(item):
+            raise ValueError('EXPLICIT_BAR_QUALIFICATION_AND_EXECUTION_FLAGS_REQUIRED')
+        if any(type(item[name]) is not bool for name in explicit - {'status'}):
+            raise ValueError('BAR_EVIDENCE_FLAGS_MUST_BE_BOOLEAN')
+        if not isinstance(item['status'], str) or not item['status']:
+            raise ValueError('EXPLICIT_BAR_STATUS_REQUIRED')
         data = dict(item)
         for name in ('session','next_session'):
             if data.get(name): data[name] = date.fromisoformat(data[name])

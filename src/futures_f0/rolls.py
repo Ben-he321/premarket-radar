@@ -1,6 +1,20 @@
 """Prior-information-only roll decision; actual trade legs belong to the engine."""
+import re
+
 from .model import RollInstruction
+from .protocol import MARKETS
 from .runtime import canonical_hash
+
+
+def _overlap_evidence(bar):
+    """Bind identity, raw values and their actual knowledge times together."""
+    return dict(contract_id=bar.contract_id, source_hash=bar.source_hash,
+                session=bar.session.isoformat(),
+                next_session=bar.next_session.isoformat() if bar.next_session else None,
+                opens_at=bar.opens_at.isoformat(), closes_at=bar.closes_at.isoformat(),
+                available_at=bar.available_at.isoformat(), raw_close=bar.close,
+                volume=bar.volume, status=bar.status, session_verified=bar.session_verified,
+                is_mock=bar.is_mock)
 
 
 def decide_roll(old_spec, new_spec, overlaps, *, decision_at, next_session,
@@ -48,19 +62,31 @@ def decide_roll(old_spec, new_spec, overlaps, *, decision_at, next_session,
               and n.volume > o.volume >= 0 for o, n in pairs))
     if not boundary and not volume:
         return None
-    signal_id, signal_offset = None, 0.0
+    signal_id, signal_offset, signal_evidence = None, 0.0, None
     if signal_overlap:
         so, sn = signal_overlap
+        signal_root = MARKETS.get(old_spec.market, {}).get('signal')
+        if (not signal_root or so.contract_id == sn.contract_id or
+                any(not re.fullmatch(re.escape(signal_root) + r'[FGHJKMNQUVXZ][0-9]{1,4}', b.contract_id)
+                    for b in (so, sn))):
+            raise ValueError('SIGNAL_ROLL_CONTRACT_IDENTITY_MISMATCH')
         if so.session != sn.session or so.session >= next_session or max(so.available_at, sn.available_at) > decision_at:
             raise ValueError('SIGNAL_ROLL_LOOKAHEAD')
         if any(b.status != 'QUALIFIED' or b.is_mock or not b.session_verified for b in (so, sn)):
             raise ValueError('SIGNAL_ROLL_UNVERIFIED')
         signal_id, signal_offset = sn.contract_id, sn.close - so.close
-    evidence = dict(old=last_old.source_hash, new=last_new.source_hash,
-                    previous=[(o.source_hash,n.source_hash) for o,n in pairs],
-                    decision_at=decision_at.isoformat(), next_session=next_session.isoformat(),
-                    safe_exit=old_spec.safe_exit_session.isoformat())
-    return RollInstruction(old_spec.market, old_spec.contract_id, new_spec.contract_id,
-                           decision_at, last_new.close-last_old.close,
-                           'DELIVERY_FIVE_SESSION_BOUNDARY' if boundary else 'TWO_COMPLETED_DAY_VOLUME_CROSS',
-                           canonical_hash(evidence), signal_id, signal_offset)
+        signal_evidence = dict(old=_overlap_evidence(so), new=_overlap_evidence(sn),
+                               signal_offset=signal_offset)
+    payload = dict(market=old_spec.market, old_contract=old_spec.contract_id,
+                   new_contract=new_spec.contract_id, known_at=decision_at.isoformat(),
+                   execution_offset=last_new.close-last_old.close,
+                   reason='FIVE_SESSION_DELIVERY_BOUNDARY' if boundary else 'TWO_PRIOR_SESSION_VOLUME_CROSS',
+                   new_signal_contract=signal_id, signal_offset=signal_offset)
+    evidence = dict(evidence_version='F0_ROLL_DECISION_V2_BOUND_PAYLOAD', payload=payload,
+                    execution_overlap=[dict(old=_overlap_evidence(o), new=_overlap_evidence(n)) for o,n in pairs],
+                    signal_overlap=signal_evidence, next_session=next_session.isoformat(),
+                    root=old_spec.root, quote_unit=old_spec.quote_unit, multiplier=old_spec.multiplier,
+                    old_last_trade=old_spec.last_trade.isoformat(), new_last_trade=new_spec.last_trade.isoformat(),
+                    old_safe_exit=old_spec.safe_exit_session.isoformat(),
+                    new_safe_exit=new_spec.safe_exit_session.isoformat())
+    return RollInstruction(**(payload | {'known_at': decision_at, 'evidence_hash': canonical_hash(evidence)}))

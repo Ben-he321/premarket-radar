@@ -40,7 +40,7 @@ def test_roll_needs_two_prior_consecutive_days_not_future_volume():
     a,b=pair(date(2022,2,1)),pair(date(2022,2,2))
     known=b[0].available_at
     roll=decide_roll(old,new,[a,b],decision_at=known,next_session=date(2022,2,3))
-    assert roll.reason=='TWO_COMPLETED_DAY_VOLUME_CROSS' and roll.execution_offset==10
+    assert roll.reason=='TWO_PRIOR_SESSION_VOLUME_CROSS' and roll.execution_offset==10
     assert decide_roll(old,new,[a],decision_at=known,next_session=date(2022,2,2)) is None
     with pytest.raises(ValueError,match='FUTURE'):
         decide_roll(old,new,[a,b],decision_at=known-timedelta(seconds=1),next_session=date(2022,2,3))
@@ -53,7 +53,7 @@ def test_safety_roll_does_not_need_volume_win_and_never_scales_product():
     new=spec('MESM2',last_trade=date(2022,6,17),safe_exit_session=date(2022,6,10))
     p=pair(date(2022,2,2),new_volume=20)
     roll=decide_roll(old,new,[p],decision_at=p[0].available_at,next_session=date(2022,2,3))
-    assert roll.reason=='DELIVERY_FIVE_SESSION_BOUNDARY'
+    assert roll.reason=='FIVE_SESSION_DELIVERY_BOUNDARY'
     with pytest.raises(ValueError,match='UNITS_MISMATCH'):
         decide_roll(old,replace(new,multiplier=1),[p],decision_at=p[0].available_at,next_session=date(2022,2,3))
     with pytest.raises(ValueError,match='MOCK_ROLL'):
@@ -99,7 +99,10 @@ def test_raw_download_cannot_skip_normalization_review(tmp_path):
         QualifiedInputs(p,ROOT/'docs/futures_f0/contract_registry.csv')
 
 
-def test_blocked_run_does_not_initialize_six_empty_accounts(tmp_path):
+def test_blocked_run_does_not_initialize_six_empty_accounts(tmp_path, monkeypatch):
+    # This test isolates the input gate; an expired real pilot deadline is
+    # covered by the resource tests and must not make this unit test age out.
+    monkeypatch.setattr('src.futures_f0.__main__.Guard.check', lambda *a, **k: None)
     output=tmp_path/'futures-f0-mock-test'
     p=tmp_path/'bad_manifest.json';p.write_text('{"mock":true}')
     with pytest.raises(ValueError,match='REAL_EXCHANGE'):
@@ -123,3 +126,21 @@ def test_root_registry_units_and_pool_match_protocol():
         assert row['market'] in MARKETS
         assert Decimal(row['usd_multiplier_per_quote_unit'])*Decimal(row['tick_in_quote_units'])==Decimal(row['tick_value_usd'])
         assert row['verification_status']=='ROOT_TEMPLATE_ONLY' and row['contract_id']=='UNKNOWN'
+
+
+@pytest.mark.parametrize('missing', ['status', 'tradable_open', 'tradable_stop', 'session_verified', 'is_mock'])
+def test_omitted_execution_evidence_never_inherits_tradable_default(tmp_path, missing):
+    inputs = QualifiedInputs(manifest_fixture(tmp_path), ROOT/'docs/futures_f0/contract_registry.csv')
+    row = json.loads(json.dumps(asdict(bar('MESH2', date(2022, 1, 4), 100, 100)), default=str))
+    row.pop(missing)
+    with pytest.raises(ValueError, match='EXPLICIT_BAR_QUALIFICATION'):
+        inputs._bar(row)
+
+
+@pytest.mark.parametrize('value', ['true', 'false', 1, None])
+def test_truthy_values_are_not_verified_execution_flags(tmp_path, value):
+    inputs = QualifiedInputs(manifest_fixture(tmp_path), ROOT/'docs/futures_f0/contract_registry.csv')
+    row = json.loads(json.dumps(asdict(bar('MESH2', date(2022, 1, 4), 100, 100)), default=str))
+    row['tradable_open'] = value
+    with pytest.raises(ValueError, match='EVIDENCE_FLAGS_MUST_BE_BOOLEAN'):
+        inputs._bar(row)

@@ -1,8 +1,8 @@
 """Bounded input qualification, exchange-session aggregation and zero-cash preflight.
 
 There is no market-data fallback. Public prices/credits are not account rights.
-Only metadata calls are automatic; a positive data quote is blocked in this pilot
-until actual balance/expiry/authorization can be reviewed in a subsequent step.
+Positive list-price downloads additionally require an archived account-credit
+proof and a durable reservation under the separately authorized cash-zero cap.
 """
 from __future__ import annotations
 
@@ -114,13 +114,16 @@ class MetadataClient:
         result['status'] = 'REAL_METADATA_ESTIMATE_NOT_DOWNLOAD_OR_CREDIT_PROOF'
         return result
 
-    def download_zero_quote(self, request, estimate, *, exact_contracts_verified=False):
+    def download_zero_quote(self, request, estimate, *, exact_contracts_verified=False, budget=None):
         """Stream only freshly quoted zero-cash requests; no positive-cost bypass.
 
         Completed content hashes are reusable. Interrupted responses are retained
         as .partial; no automatic rebilling/retry. A successful download is raw
         vendor data, never automatically qualified for research.
         """
+        if budget is not None:
+            return self.download_with_credit(request, budget,
+                exact_contracts_verified=exact_contracts_verified)
         parameters = request.parameters()
         request_hash = canonical_hash(parameters)
         target = self.config.data_dir / 'vendor_cache' / (request_hash + '.csv')
@@ -181,6 +184,99 @@ class MetadataClient:
             return value
         except requests.RequestException:
             raise RuntimeError('DOWNLOAD_FAILED_NO_AUTOMATIC_RETRY_REDACTED') from None
+        finally:
+            if response is not None:
+                response.close()
+
+    def download_with_credit(self, request, budget, *, exact_contracts_verified=False):
+        """Refresh the real quote, reserve its full price, then request once.
+
+        Caller-created estimates never authorize this endpoint. All exceptions,
+        including interrupts and unknown server outcomes, retain the reservation.
+        ``quoted_cost_usd`` is the vendor's list-price estimate, not a statement
+        that a cash payment or a settled credit debit has been observed.
+        """
+        from .budget import BudgetGate
+
+        if not isinstance(budget, BudgetGate) or budget.data_dir != self.config.data_dir.resolve():
+            raise ValueError('BUDGET_GATE_MUST_USE_SAME_RUN_DIRECTORY')
+        parameters = request.parameters()
+        request_hash = canonical_hash(parameters)
+        target = self.config.data_dir / 'vendor_cache' / (request_hash + '.csv')
+        receipt = target.with_suffix('.receipt.json')
+        partial = target.with_suffix('.partial')
+        # A complete content-verified batch is reused before metadata or billing
+        # work. An interrupted batch is never downloaded again automatically.
+        if target.exists() and receipt.exists():
+            old = json.loads(receipt.read_text(encoding='utf-8'))
+            if old.get('request_sha256') != request_hash or old.get('sha256') != digest(target):
+                raise ValueError('CACHED_SOURCE_HASH_MISMATCH')
+            return old
+        if target.exists() or receipt.exists() or partial.exists():
+            raise ValueError('INCOMPLETE_CACHE_REQUIRES_REVIEW_NO_AUTO_REBILL')
+        if not exact_contracts_verified:
+            raise ValueError('EXACT_OUTRIGHT_CONTRACT_IDENTITIES_REQUIRED')
+        if not self.config.api_key:
+            raise ValueError('DATABENTO_API_KEY_MISSING')
+        if self.guard:
+            self.guard.check({'stage': 'before_credit_quote', 'request_sha256': request_hash})
+        fresh = self.estimate(request)
+        reservation = budget._reserve_fresh_quote(parameters, fresh, api_key=self.config.api_key)
+        response = None
+        acquired_at = utcnow().isoformat()
+        try:
+            if self.guard:
+                self.guard.check({'stage': 'before_download', 'request_sha256': request_hash})
+            # Reserve/flush first and mark the attempt before even opening the
+            # connection, so pre-response failures cannot erase a possible bill.
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with partial.open('xb') as stream:
+                budget._assert_send_allowed(reservation, api_key=self.config.api_key)
+                response = self.session.post(self.base + 'timeseries.get_range',
+                    data=dict(parameters, stype_out='instrument_id', encoding='csv', compression='none'),
+                    auth=(self.config.api_key, ''), timeout=(10, 30), stream=True)
+                if response.status_code != 200:
+                    raise RuntimeError('DOWNLOAD_HTTP_' + str(response.status_code))
+                written = 0
+                for chunk in response.iter_content(chunk_size=65536):
+                    if self.guard:
+                        self.guard.check({'stage': 'download', 'request_sha256': request_hash,
+                                          'bytes_retained': written})
+                    written += len(chunk)
+                    if written > 128 * 1024 ** 2:
+                        raise ValueError('BATCH_DOWNLOAD_SIZE_LIMIT_SPLIT_REQUEST_AFTER_REVIEW')
+                    stream.write(chunk)
+                stream.flush()
+                import os
+                os.fsync(stream.fileno())
+            if written == 0:
+                raise ValueError('EMPTY_RESPONSE_NOT_MARKET_COVERAGE')
+            partial.replace(target)
+            value = dict(request=parameters, request_sha256=request_hash, source=self.base,
+                received_at=acquired_at, completed_at=utcnow().isoformat(),
+                historical_publication_time='UNKNOWN_UNTIL_RECORD_QUALIFICATION',
+                sha256=digest(target), bytes=written, quoted_cost_usd=fresh['get_cost'],
+                authenticated_estimate=fresh, research_qualified=False,
+                credit_reservation_id=reservation['reservation_id'],
+                reserved_list_price_usd=reservation['reserved_cost_usd'],
+                budget_reservation_sha256=reservation['sha256'],
+                evidence_manifest_sha256=reservation['evidence_manifest_sha256'],
+                credit_applicability=reservation['credit_applicability'],
+                cash_authorization_usd=0, cash_payment_usd=None, credit_debit_usd=None,
+                billing_reconciliation='NOT_INDEPENDENTLY_RECONCILED')
+            write_json(receipt, value, immutable=True)
+            budget._finish(reservation, receipt_path=receipt)
+            return value
+        except BaseException as error:
+            try:
+                budget._finish(reservation, failure=type(error).__name__)
+            except Exception:
+                # A durable RESERVE still occupies its entire price when even
+                # recording the failure is interrupted or the lock is busy.
+                pass
+            if isinstance(error, requests.RequestException):
+                raise RuntimeError('DOWNLOAD_FAILED_NO_AUTOMATIC_RETRY_REDACTED') from None
+            raise
         finally:
             if response is not None:
                 response.close()

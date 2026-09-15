@@ -27,8 +27,19 @@ def export_csv(path, rows):
             w.writerow({k:json.dumps(v,ensure_ascii=False) if isinstance(v,(dict,list)) else v for k,v in row.items()})
 
 
-def run_normalized(config, manifest, margin):
-    guard=Guard(PROTOCOL['operations']['deadline_utc'],config.data_dir)
+def run_normalized(config, manifest, margin, round_dir=None):
+    # A later user-authorized round owns its deadline/output, while the original
+    # strategy and original round's files remain immutable.
+    if round_dir is not None:
+        from .acquisition import Continuation
+        continuation = Continuation(round_dir)
+        guard, round_output = continuation.guard, continuation.output
+        continuation.close()
+        if config.data_dir.resolve() != continuation.config.data_dir.resolve():
+            raise ValueError('CONTINUATION_ENGINE_DATA_ROOT_MISMATCH')
+    else:
+        guard=Guard(PROTOCOL['operations']['deadline_utc'],config.data_dir)
+        round_output=config.data_dir
     guard.check({'stage':'before_real_input_qualification'})
     # No account is created until the actual-source input gate passes.
     inputs=QualifiedInputs(manifest,ROOT/'docs/futures_f0/contract_registry.csv')
@@ -36,7 +47,20 @@ def run_normalized(config, manifest, margin):
     frozen_content={k:v for k,v in frozen.items() if k not in ('protocol_sha256','frozen_at','attachment_sha256')}
     if frozen_content != PROTOCOL:
         raise ValueError('FROZEN_PROTOCOL_CHANGED')
-    output=config.data_dir/'runs'/('normalized_'+inputs.manifest_hash[:12]+'_'+margin)
+    # Reject a one-day connectivity sample before creating any research account.
+    # Real research may legitimately have zero fills once sufficient input is
+    # present; a connection probe must not be advertised as such a backtest.
+    preflight_counts = {}
+    trading_dates = set()
+    for batch in inputs.batches(guard):
+        for day in batch:
+            if day.signal.status == 'QUALIFIED':
+                preflight_counts[day.market] = preflight_counts.get(day.market, 0) + 1
+                if EngineConfig().trading_start <= day.signal.session <= EngineConfig().trading_end:
+                    trading_dates.add(day.signal.session)
+    if not trading_dates or max(preflight_counts.values(), default=0) < 56:
+        raise ValueError('INSUFFICIENT_QUALIFIED_DAILY_INPUT_NO_ACCOUNT_CREATED')
+    output=round_output/'runs'/('normalized_'+inputs.manifest_hash[:12]+'_'+margin)
     output.mkdir(parents=True,exist_ok=True)
     if (output/'COMPLETED.json').exists():
         raise ValueError('COMPLETED_MATRIX_REUSED_NO_AUTOMATIC_RERUN')
@@ -85,8 +109,11 @@ def main(argv=None):
     parser.add_argument('--data-dir')
     parser.add_argument('--secrets-file')
     parser.add_argument('--input-manifest')
+    parser.add_argument('--round-dir', help='Existing separately authorized continuation; never edits the frozen protocol')
     parser.add_argument('--margin',choices=['10','20'],default='10')
     args=parser.parse_args(argv)
+    if args.command == 'preflight' and args.round_dir:
+        parser.error('Continuation preflight must use acquisition metadata; preserve the original capability report')
     config=load_config(args.data_dir,args.secrets_file)
     config.data_dir.mkdir(parents=True,exist_ok=True)
     with FileLock(str(config.data_dir/'f0.lock'),timeout=0):
@@ -96,13 +123,29 @@ def main(argv=None):
                               'permission':result['historical_permission'],'data_dir':str(config.data_dir)}))
         else:
             if not args.input_manifest: parser.error('--input-manifest is required')
+            error_root = config.data_dir if not args.round_dir else None
             try:
-                output=run_normalized(config,args.input_manifest,args.margin)
+                if args.round_dir:
+                    # Do not use an unvalidated user path even for error logs.
+                    # Invalid paths must not overwrite an older round's output.
+                    from .acquisition import Continuation
+                    validation = Continuation(args.round_dir)
+                    try:
+                        if validation.config.data_dir.resolve() != config.data_dir.resolve():
+                            raise ValueError('CONTINUATION_ENGINE_DATA_ROOT_MISMATCH')
+                        error_root = validation.output
+                    finally:
+                        validation.close()
+                output=run_normalized(config,args.input_manifest,args.margin,args.round_dir)
                 print(json.dumps({'output':str(output)}))
             except Exception as error:
                 # No credential-bearing request exception is included in reports.
-                write_json(config.data_dir/'LAST_RUN_ERROR.json',dict(at=utcnow().isoformat(),
-                           error_type=type(error).__name__,status='STOPPED_NO_AUTOMATIC_RETRY'))
+                if error_root is not None:
+                    value = dict(at=utcnow().isoformat(), error_type=type(error).__name__,
+                                 status='STOPPED_NO_AUTOMATIC_RETRY')
+                    write_json(error_root/'run_errors'/(utcnow().strftime('%Y%m%dT%H%M%S%fZ')+'.json'),
+                               value, immutable=True)
+                    write_json(error_root/'LAST_RUN_ERROR.json',value)
                 raise
 
 
