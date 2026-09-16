@@ -17,6 +17,7 @@ import math
 from statistics import median
 
 from .indicators import RollingFeatures
+from .risk import adverse_tick_fill, baseline_initial_risk, number
 from .model import (Campaign, ContractSpec, EngineConfig, EngineResult, Intent,
                     Layer, MarketDay, SessionBar, RollInstruction)
 
@@ -358,9 +359,7 @@ class FuturesEngine:
         return amount * (1 if base else self.config.commission_multiplier)
 
     def _fill(self, price, side, spec):
-        units = price / spec.tick_size
-        rounded = math.ceil(units - 1e-10) if side > 0 else math.floor(units + 1e-10)
-        return (rounded + side * self.config.slippage_ticks) * spec.tick_size
+        return float(adverse_tick_fill(price, side, spec.tick_size, self.config.slippage_ticks))
 
     def _margin(self, spec, price, *, maintenance=False):
         if self.config.margin_scenario == "VERIFIED_HISTORICAL":
@@ -450,9 +449,11 @@ class FuturesEngine:
         if margin <= 0:
             return 0, "NONPOSITIVE_MARGIN"
         entry_cost = self._commission(spec)
-        # Actual entry already embeds entry friction: add both commissions and
-        # the baseline exit friction exactly once, never double-count entry slip.
-        initial_loss = distance * spec.multiplier + 2 * self._commission(spec, base=True) + 2 * spec.tick_value
+        # Include the known adverse exit tick rounding and baseline exit costs.
+        # Scenario entry already embeds entry slip. Stress exit costs remain a
+        # separate scenario proxy, not a guaranteed maximum loss or sizing rule.
+        initial_loss = baseline_initial_risk(entry, stop, direction, spec.multiplier,
+                                            spec.tick_size, self._commission(spec, base=True)).loss
         risk_per = distance * spec.multiplier + self._commission(spec) + c.slippage_ticks * spec.tick_value
         campaign_margin = self._margin(spec, campaign.mark) * campaign.quantity if campaign else 0.0
         caps = {
@@ -469,7 +470,8 @@ class FuturesEngine:
             current_metals = sum(r for m, r in risks.items() if m in {"GC", "HG", "GOLD", "COPPER"})
             caps["METALS_GIVEBACK_LIMIT"] = math.floor(max(0, equity * c.metals_giveback_fraction - current_metals) / risk_per)
         if campaign is None:
-            caps["INITIAL_RISK_OR_MINIMUM_CONTRACT"] = math.floor(equity * c.initial_risk_fraction / initial_loss)
+            caps["INITIAL_RISK_OR_MINIMUM_CONTRACT"] = int(
+                number(equity) * number(c.initial_risk_fraction) // initial_loss)
             if len(self.positions) >= c.max_markets:
                 caps["MAX_FOUR_MARKETS"] = 0
         if max_qty is not None:

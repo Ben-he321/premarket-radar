@@ -6,32 +6,16 @@ failure can be established independently of those missing necessary inputs.
 """
 from __future__ import annotations
 
-from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from datetime import date
 from statistics import median
+from .risk import number, adverse_tick_fill, baseline_initial_risk
 
 COSTS = {'BASE_2T': (2, 1), 'STRESS_4T': (4, 1),
          'DOUBLE_COMMISSION_4T': (4, 2)}
 
 
-def number(value):
-    if isinstance(value, bool):
-        raise ValueError('BOOLEAN_IS_NOT_NUMERIC_EVIDENCE')
-    result = Decimal(str(value))
-    if not result.is_finite():
-        raise ValueError('NONFINITE_FITNESS_INPUT')
-    return result
-
-
 def adverse_fill(price, direction, tick, slip):
-    if direction not in (-1, 1) or isinstance(direction, bool):
-        raise ValueError('INTEGER_LONG_OR_SHORT_REQUIRED')
-    price, tick = number(price), number(tick)
-    if tick <= 0 or slip not in (2, 4):
-        raise ValueError('FROZEN_TICK_OR_SLIPPAGE_REQUIRED')
-    units = (price / tick).to_integral_value(
-        rounding=ROUND_CEILING if direction == 1 else ROUND_FLOOR)
-    return (units + direction * slip) * tick
+    return adverse_tick_fill(price, direction, tick, slip)
 
 
 def liquidity(prior_volumes):
@@ -91,7 +75,8 @@ def one_contract(*, raw_price, multiplier, tick_size, margin_fraction, direction
         if a <= 0: raise ValueError('POSITIVE_OBSERVED_ATR_REQUIRED')
         stop = previous - direction * 2 * a; distance = direction * (f-stop)
         crosses = direction * (p-stop) <= 0 or distance <= 0
-        loss = distance*m + 2*base_commission + 2*tv
+        baseline = baseline_initial_risk(f, stop, direction, m, tick, base_commission)
+        loss = baseline.loss
         q = 0 if crosses or loss <= 0 else int(number(115) // loss)
         exit_fill = adverse_fill(stop, -direction, tick, slip)
         scenario_loss = direction*(f-exit_fill)*m + 2*commission
@@ -99,10 +84,13 @@ def one_contract(*, raw_price, multiplier, tick_size, margin_fraction, direction
                     atr=str(a), previous_execution_close=str(previous), stop=str(stop),
                     directional_raw_gap=str(direction*(p-previous)),
                     initial_size_loss_usd=str(loss), initial_risk_integer_cap=q,
+                    baseline_exit_fill=str(baseline.exit_fill),
+                    baseline_exit_rounding_cost_usd=str(baseline.exit_rounding_cost),
                     scenario_stop_proxy_loss_usd=str(scenario_loss),
                     scenario_exit_fill=str(exit_fill), open_crosses_stop=crosses)
         if q < 1: blockers.append('OPEN_CROSSED_STOP' if crosses else 'INITIAL_RISK_OR_MINIMUM_CONTRACT')
-    # A labelled illustration, NOT an observed ATR or a modified strategy rule.
+    # Continuous necessary upper bound only; the tick grid can lower the actual
+    # admissible ATR (e.g. the artificial MZC example: 10.1 bound, 10.0 on-grid).
     zero_gap_max_atr = (number(115)-friction-2*base_commission-2*tv)/(2*m)
     unknown = []
     if risk['status'] == 'UNKNOWN': unknown.append('ATR_OR_PREVIOUS_EXECUTION_CLOSE_UNKNOWN')
@@ -120,6 +108,7 @@ def one_contract(*, raw_price, multiplier, tick_size, margin_fraction, direction
         roundtrip_slippage_on_tick_usd=str(2*slip*tv),
         roundtrip_cost_on_tick_usd=str(2*commission+2*slip*tv),
         zero_gap_atr_ceiling_illustration=str(zero_gap_max_atr),
+        zero_gap_atr_ceiling_basis='UNROUNDED_CONTINUOUS_NECESSARY_UPPER_BOUND_NOT_ADMISSION',
         zero_gap_is_observed=False, risk=risk, liquidity=liq,
         financial_status='RULE_NOT_ALLOWED' if blockers else 'INSUFFICIENT_EVIDENCE' if unknown else 'NECESSARY_CONDITIONS_PASS',
         blockers=blockers, unknown=unknown,
