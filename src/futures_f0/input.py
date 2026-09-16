@@ -3,7 +3,7 @@
 The raw Databento definitions/statistics-to-manifest integration still needs
 actual-source qualification. A downloaded CSV is never accepted automatically.
 """
-from dataclasses import fields
+from dataclasses import fields,asdict
 from datetime import date
 import csv
 import json
@@ -13,10 +13,10 @@ import math
 from .data import verify_input_manifest, timestamp, SessionWindow
 from .model import ContractSpec, SessionBar, MarketDay, RollInstruction
 from .protocol import MARKETS
-from .runtime import digest
+from .runtime import digest,canonical_hash
 from .provenance import verify_session_derivation, verify_bar_derivation
 from .session_inputs import capture_prefix_clock
-from .vendor import EvidenceFile, timestamp_ns
+from .vendor import EvidenceFile, timestamp_ns,model_time
 
 
 def small_json(path, limit=8*1024**2):
@@ -27,7 +27,7 @@ def small_json(path, limit=8*1024**2):
 
 
 class QualifiedInputs:
-    def __init__(self, manifest_path, registry_path):
+    def __init__(self, manifest_path, registry_path, *, guard=None):
         self.path = Path(manifest_path).resolve()
         self.manifest = verify_input_manifest(self.path)
         self.manifest_hash = digest(self.path)
@@ -39,6 +39,27 @@ class QualifiedInputs:
         with Path(registry_path).open(encoding='utf-8-sig', newline='') as f:
             registry = {r['root']:r for r in csv.DictReader(f)}
         self.registry = registry
+        self.qualification_context=None;self.qualification_catalog=None
+        if self.manifest.get('qualified_source_context'):
+            from .qualification import load_context
+            entry=self.manifest['qualified_source_context'];p=Path(entry['path']).resolve()
+            if not p.is_relative_to(Path(self.manifest['derivation_source_root']).resolve()):
+                raise ValueError('QUALIFIED_CONTEXT_OUTSIDE_SOURCE_ROOT')
+            self.qualification_context,self.qualification_catalog=load_context(
+                EvidenceFile(p,entry['sha256'],entry['source']),guard=guard)
+            if any(x['source_sha256'] not in self.manifest.get('source_object_hashes',[])
+                   for x in self.qualification_context['sources']):
+                raise ValueError('QUALIFIED_CONTEXT_OBJECT_NOT_IN_MANIFEST')
+        self.settlements=small_json(self.files['settlements']) if self.qualification_context else None
+        self.statuses=small_json(self.files['status']) if self.qualification_context else None
+        self.mappings=small_json(self.files['mapping']) if self.qualification_context else None
+        self.roll_decisions=None
+        if self.qualification_context:
+            entry=self.manifest.get('roll_decisions',{});p=(self.path.parent/entry.get('path','')).resolve()
+            if not p.is_relative_to(self.path.parent) or not p.is_file() or digest(p)!=entry.get('sha256'):
+                raise ValueError('SOURCE_BOUND_ROLL_DECISIONS_REQUIRED')
+            self.roll_decisions=small_json(p)
+            if not isinstance(self.roll_decisions,list) or len(self.roll_decisions)>32:raise ValueError('BOUNDED_ROLL_DECISIONS_REQUIRED')
         entries = small_json(self.files['definitions'])
         if not isinstance(entries,list) or not 1 <= len(entries) <= 1000:
             raise ValueError('INVALID_BOUNDED_DEFINITIONS')
@@ -70,7 +91,7 @@ class QualifiedInputs:
         if set(entry) - allowed:
             raise ValueError('UNKNOWN_CONTRACT_DEFINITION_FIELD')
         data = dict(entry)
-        for name in ('listed','last_trade','safe_exit_session','margin_valid_until'):
+        for name in ('listed','last_trade','safe_exit_session','margin_valid_until','eligible_from'):
             if data.get(name): data[name] = date.fromisoformat(data[name])
         if data.get('margin_asof'): data['margin_asof'] = timestamp(data['margin_asof'])
         spec = ContractSpec(**data)
@@ -83,8 +104,17 @@ class QualifiedInputs:
             raise ValueError('SPEC_NOT_DUAL_VERIFIED')
         if spec.multiplier != float(row['usd_multiplier_per_quote_unit']) or spec.tick_size != float(row['tick_in_quote_units']):
             raise ValueError('VENDOR_EXCHANGE_SPEC_UNIT_MISMATCH')
-        if spec.listed < date.fromisoformat(row['root_first_trade_date']) or spec.listed > spec.last_trade:
+        eligible=spec.eligible_from or spec.listed
+        if eligible is None or eligible < date.fromisoformat(row['root_first_trade_date']) or eligible > spec.last_trade:
             raise ValueError('PRE_LAUNCH_OR_INVALID_CONTRACT_LIFETIME')
+        if spec.eligible_from is not None or spec.listed is None:
+            if self.qualification_context is None:raise ValueError('OBSERVED_EXISTENCE_RAW_PROOF_REQUIRED')
+            from .qualification import qualified_contract
+            proof=qualified_contract(self.qualification_catalog,self.qualification_context,spec.contract_id,row)
+            if (spec.listed is not None or str(spec.eligible_from)!=proof['eligible_from'] or
+                spec.eligibility_basis!=proof['eligibility_basis'] or spec.qualification_sha256!=canonical_hash(proof)
+                or str(spec.last_trade)!=proof['last_trade'] or str(spec.safe_exit_session)!=proof['safe_exit_session']):
+                raise ValueError('OBSERVED_EXISTENCE_OR_BOUNDARY_PROOF_MISMATCH')
         return spec
 
     def _bar(self, item, guard=None):
@@ -108,8 +138,8 @@ class QualifiedInputs:
         for name in ('session','next_session'):
             if data.get(name): data[name] = date.fromisoformat(data[name])
         for name in ('opens_at','closes_at','available_at','received_at','settlement_available_at','settlement_reference_at',
-                     'input_cutoff','internal_calculated_at','supplier_published_at'):
-            if data.get(name): data[name] = timestamp(data[name])
+                     'input_cutoff','internal_calculated_at','supplier_published_at','calendar_confirmed_at'):
+            if data.get(name): data[name] = model_time(timestamp_ns(data[name]))
         bar = SessionBar(**data)
         if self.manifest.get('session_derivations') and bar.availability_basis != 'INTERNAL_CAPTURE_PREFIX':
             raise ValueError('DERIVATION_MANIFEST_REQUIRES_CAPTURE_PREFIX_NO_RAW_FALLBACK')
@@ -143,7 +173,7 @@ class QualifiedInputs:
                 raw_hashes=self.manifest.get('source_object_hashes', []),
                 registry_row=expected_registry, guard=guard)
             verify_bar_derivation(item, derived)
-            if (bar.input_cutoff != bar.closes_at or bar.internal_calculated_at != bar.input_cutoff
+            if (bar.input_cutoff != bar.closes_at or bar.internal_calculated_at != max(bar.input_cutoff,bar.calendar_confirmed_at or bar.input_cutoff)
                     or bar.available_at != bar.internal_calculated_at or bar.supplier_published_at is not None
                     or bar.received_at is not None):
                 raise ValueError('CAPTURE_PREFIX_CLOCKS_OR_UNKNOWN_RECEIPT_MISREPRESENTED')
@@ -162,6 +192,10 @@ class QualifiedInputs:
         if not date(2021,1,1) <= bar.session <= date(2025,12,31):
             raise ValueError('BAR_OUTSIDE_FROZEN_HISTORY')
         key = bar.contract_id + '|' + bar.session.isoformat()
+        if self.qualification_context:
+            if not derived.get('research_qualified'):raise ValueError('COMPUTED_INPUT_NOT_QUALIFIED')
+            if (self.settlements.get(key)!=derived['settlement'] or self.statuses.get(key)!=derived['execution_status']):
+                raise ValueError('SETTLEMENT_OR_STATUS_MANIFEST_NOT_BOUND_TO_RAW_DERIVATION')
         calendar = self.calendars.get(key)
         if not calendar:
             raise ValueError('MISSING_VERIFIED_SESSION_MAPPING:' + key)
@@ -169,8 +203,8 @@ class QualifiedInputs:
             raise ValueError('WRONG_EXCHANGE_CALENDAR_TIMEZONE')
         segments = tuple((timestamp(a),timestamp(b)) for a,b in calendar['segments'])
         window = SessionWindow(bar.session, calendar['timezone'], segments, calendar['source'],
-                               calendar['evidence_sha256'], calendar.get('verified') is True)
-        window.validate()
+                               calendar['evidence_sha256'], calendar.get('verified') is True,calendar.get('dated_evidence'))
+        window.validate(guard=guard)
         if bar.availability_basis == 'INTERNAL_CAPTURE_PREFIX':
             actual_segments = [(timestamp_ns(a), timestamp_ns(b)) for a, b in calendar['segments']]
             derived_segments = [(timestamp_ns(a), timestamp_ns(b)) for a, b in derived['calendar']['segments']]
@@ -219,11 +253,21 @@ class QualifiedInputs:
                     execution=tuple(execution)
                     if any(self.specs[b.contract_id].root not in MARKETS[market]['execution'] for b in execution):
                         raise ValueError('WRONG_EXECUTION_ROOT')
+                    if self.qualification_context:
+                        mapping=self.mappings.get(market+'|'+str(signal.session))
+                        expected=dict(market=market,signal=signal.contract_id,execution=[b.contract_id for b in execution],
+                                      session=str(signal.session),quote_unit=self.specs[signal.contract_id].quote_unit)
+                        if mapping!=expected or any(self.specs[b.contract_id].quote_unit!=expected['quote_unit'] for b in execution):
+                            raise ValueError('DATED_STANDARD_MICRO_MAPPING_PROOF_MISMATCH')
+                        if not row.get('mapping_verified') or row.get('mapping_source')!='RAW_DEFINITION_IDENTITY_AND_FROZEN_UNIT_MAPPING':
+                            raise ValueError('COMPUTED_MAPPING_ATTESTATION_MISMATCH')
                     roll=None
                     if row.get('roll'):
                         r=dict(row['roll']);r['known_at']=timestamp(r['known_at']);roll=RollInstruction(**r)
                         if roll.evidence_hash not in self.manifest.get('verified_roll_decision_hashes',[]):
                             raise ValueError('CAUSAL_ROLL_DECISION_EVIDENCE_REQUIRED')
+                        if self.qualification_context:
+                            self._verify_roll(roll,signal.session,guard)
                     days.append(MarketDay(market,signal,execution,roll,row.get('mapping_verified') is True,
                                           row.get('mapping_source','UNKNOWN')))
                 if not days: continue
@@ -232,6 +276,27 @@ class QualifiedInputs:
                     raise ValueError('INPUT_SESSION_OUT_OF_ORDER')
                 previous=session
                 yield days
+
+    def _verify_roll(self,roll,session,guard):
+        from .rolls import decide_roll
+        entries=[x for x in self.roll_decisions if x['instruction']['evidence_hash']==roll.evidence_hash]
+        if len(entries)!=1:raise ValueError('UNIQUE_SOURCE_BOUND_ROLL_PROOF_REQUIRED')
+        entry=entries[0];instruction=dict(entry['instruction']);instruction['known_at']=timestamp(instruction['known_at'])
+        if RollInstruction(**instruction)!=roll:raise ValueError('ROLL_INSTRUCTION_CHANGED_FROM_BOUND_PROOF')
+        hashes=entry['prior_derivation_hashes']
+        if len(hashes) not in (4,8):raise ValueError('ROLL_REQUIRES_BOUNDED_PRIOR_FOUR_WAY_OVERLAP')
+        bars=[]
+        for h in hashes:
+            d=self.manifest['session_derivations'][h];p=(self.path.parent/d['path']).resolve()
+            if not p.is_relative_to(self.path.parent) or digest(p)!=d['sha256']:raise ValueError('ROLL_OVERLAP_DERIVATION_CHANGED')
+            value=small_json(p)
+            if value['derivation_sha256']!=h:raise ValueError('ROLL_OVERLAP_HASH_CHANGED')
+            bars.append(self._bar(value['engine_record_candidate'],guard=guard))
+        pairs=[bars[n:n+4] for n in range(0,len(bars),4)]
+        actual=decide_roll(self.specs[roll.old_contract],self.specs[roll.new_contract],
+            [(x[0],x[1]) for x in pairs],decision_at=roll.known_at,next_session=session,
+            signal_overlap=(pairs[-1][2],pairs[-1][3]))
+        if actual!=roll:raise ValueError('ROLL_RAW_OVERLAP_RECOMPUTATION_MISMATCH')
 
     def _quarantine(self, market, contract, reason):
         self.quarantine_count += 1

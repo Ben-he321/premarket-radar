@@ -17,7 +17,7 @@ class ContractSpec:
     root: str
     multiplier: float
     tick_size: float
-    listed: date
+    listed: date | None
     last_trade: date
     safe_exit_session: date | None
     exchange: str = "UNKNOWN"
@@ -34,6 +34,9 @@ class ContractSpec:
     margin_valid_until: date | None = None
     commission_per_side: float | None = None
     commission_source: str = "ASSUMED_2_USD_PER_CONTRACT_SIDE"
+    eligible_from: date | None = None
+    eligibility_basis: str = "VERIFIED_LISTING_DATE"
+    qualification_sha256: str | None = None
 
     @property
     def tick_value(self) -> float:
@@ -72,6 +75,7 @@ class SessionBar:
     internal_calculated_at: datetime | None = None
     supplier_published_at: datetime | None = None
     temporal_evidence_hash: str | None = None
+    calendar_confirmed_at: datetime | None = None
 
 
 @dataclass(frozen=True)

@@ -336,8 +336,9 @@ class SessionWindow:
     source: str
     evidence_sha256: str
     verified: bool
+    dated_evidence: dict | None = None
 
-    def validate(self):
+    def validate(self, *, guard=None):
         zone = ZoneInfo(self.timezone)
         if not self.verified or self.source in ('', 'UNKNOWN') or not re.fullmatch('[0-9a-f]{64}', self.evidence_sha256):
             raise ValueError('VERIFIED_DATED_EXCHANGE_CALENDAR_REQUIRED')
@@ -352,7 +353,17 @@ class SessionWindow:
         start, end = timestamp(self.segments[0][0]), timestamp(self.segments[-1][1])
         if end.astimezone(zone).date() != self.session:
             raise ValueError('SESSION_DATE_DOES_NOT_MATCH_EXCHANGE_CLOSE')
-        if start.astimezone(zone).date() < self.session - timedelta(days=1) or end-start > timedelta(hours=25):
+        if self.dated_evidence is not None:
+            from .session_inputs import DatedSession
+            from .vendor import EvidenceFile,timestamp_ns
+            entry=self.dated_evidence
+            value,actual=DatedSession(entry['contract_id'],self.session,
+                EvidenceFile(Path(entry['path']),entry['sha256'],entry['source'])).read(guard=guard)
+            if (value.get('calendar_basis')!='GLBX_STATUS_SESSION_RESET_COHORT' or
+                tuple((timestamp_ns(a),timestamp_ns(b)) for a,b in self.segments)!=actual or
+                entry['sha256']!=self.evidence_sha256):
+                raise ValueError('SESSION_WINDOW_RAW_COHORT_PROOF_MISMATCH')
+        elif start.astimezone(zone).date() < self.session - timedelta(days=1) or end-start > timedelta(hours=25):
             raise ValueError('INVALID_MULTI_DAY_SESSION_RELABEL')
 
 

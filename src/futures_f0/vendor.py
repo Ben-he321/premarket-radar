@@ -441,40 +441,25 @@ def settlement_at(source, *, instrument_id, publisher_id, session, as_of, refere
     session = date.fromisoformat(str(session))
     if not date(2021, 1, 1) <= session <= date(2025, 12, 31):
         raise ValueError('SETTLEMENT_REFERENCE_OUTSIDE_FROZEN_HISTORY')
-    cutoff, chosen, updates, last_order = timestamp_ns(as_of), None, 0, None
-    issue = 'NO_KNOWN_FINAL_ACTUAL_EOD_SETTLEMENT'
+    from .settlement import SettlementState
+    cutoff, state = timestamp_ns(as_of), SettlementState()
     for row in source.records(guard=guard):
         if row.get('instrument_id') != instrument_id or row.get('publisher_id') != publisher_id:
             continue
         if row['parse_status'] != 'PARSED_VENDOR_RECORD':
             raise ValueError('QUARANTINED_STATISTIC_REQUIRES_REVIEW')
-        if row['ts_recv_ns'] > cutoff:
-            break
-        if row.get('stat_type') != 3:
+        if row['ts_recv_ns'] > cutoff or row.get('stat_type') != 3:
             continue
         if row.get('reference_session_hint') is None:
             raise ValueError('SETTLEMENT_REFERENCE_NOT_DATE_PRECISION')
-        if row['reference_session_hint'] != str(session):
-            continue
-        order = (row['ts_recv_ns'], row.get('sequence'), row.get('channel_id'))
-        if last_order == order:
-            raise ValueError('DUPLICATE_SETTLEMENT_ORDER_REQUIRES_REVIEW')
-        last_order = order
-        updates += 1
-        chosen = None
-        flags = row['settlement_flags']
-        if row['update_action'] == 2:
-            issue = 'SETTLEMENT_DELETED_AS_OF'
-        elif row['price'] is None or not flags['final'] or not flags['actual'] or flags['intraday'] or flags['unknown_bits']:
-            issue = 'LATEST_SETTLEMENT_NOT_FINAL_ACTUAL_EOD'
-        elif row['ts_event_ns'] is None or row['ts_event_ns'] > row['ts_recv_ns']:
-            issue = 'SETTLEMENT_PUBLICATION_TIMESTAMP_UNKNOWN_OR_INCONSISTENT'
-        else:
-            chosen = row
+        if row['reference_session_hint'] == str(session):
+            state.add(row)
+    chosen, issue = state.account_candidate()
     if chosen is None:
-        return dict(status=issue, settlement=None, session=str(session), updates_as_of=updates,
+        issue = {'LATEST_VISIBLE_VERSION_DELETED':'SETTLEMENT_DELETED_AS_OF'}.get(issue,issue)
+        return dict(status=issue, settlement=None, session=str(session), updates_as_of=state.updates,
                     research_qualified=False)
-    return dict(status='CAUSAL_SETTLEMENT_CANDIDATE_REQUIRES_REVIEW',
+    return dict(status='CAUSAL_CLEARING_SETTLEMENT_CANDIDATE_REQUIRES_REVIEW',
         settlement=chosen['price'], session=str(session), reference_at=chosen['ts_ref'],
         capture_available_at=iso_ns(chosen['ts_recv_ns']),
         model_capture_available_at=model_time(chosen['ts_recv_ns']).isoformat(),
@@ -482,7 +467,8 @@ def settlement_at(source, *, instrument_id, publisher_id, session, as_of, refere
         ts_in_delta=chosen['ts_in_delta'], publisher_send_at=chosen['publisher_send_at'],
         publisher_send_time_status=chosen['publisher_send_time_status'],
         source_sha256=chosen['source_sha256'], raw_record_sha256=chosen['raw_record_sha256'],
-        updates_as_of=updates, research_qualified=False)
+        updates_as_of=state.updates, research_qualified=False)
+
 
 
 def session_candidate(source, *, definition, contract_id, window, publication_at,

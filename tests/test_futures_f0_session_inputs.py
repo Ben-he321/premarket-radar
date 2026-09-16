@@ -266,8 +266,9 @@ def test_same_packet_settlement_variants_preserved_without_arbitrary_selection(t
     kwargs=dict(contract_id='ESZ4',instrument_id=183748,publisher_id=1,session='2024-10-01',
         reference_evidence=args['reference_evidence'])
     early=settlement_versions_at([stats],decision_at='2024-10-01T18:30:00Z',**kwargs)
-    assert early['settlement'] is early['latest_visible_message'] is None
-    assert len(early['versions_visible_at_cutoff'])==2 and early['ambiguous_latest_batch']
+    assert early['settlement'] == '100.005'
+    assert not early['latest_visible_message']['flags']['trading_tick']
+    assert len(early['versions_visible_at_cutoff'])==2 and not early['ambiguous_latest_batch']
     later=settlement_versions_at([stats],decision_at='2024-10-01T19:30:00Z',**kwargs)
     assert later['settlement']=='101' and not later['ambiguous_latest_batch']
 
@@ -284,6 +285,42 @@ def test_same_capture_different_key_cannot_clear_prior_settlement_ambiguity(tmp_
         session='2024-10-01',decision_at='2024-10-01T18:30:00Z',reference_evidence=args['reference_evidence'])
     assert result['settlement'] is None and result['ambiguous_latest_batch']
     assert len(result['versions_visible_at_cutoff'])==3
+
+
+@pytest.mark.parametrize('flags,expected', [([7],None),([3,7],'100'),([6,2],None),
+    ([3,2],None),([3,1],None),([3,11],'100'),([3,3],'100')])
+def test_clearance_precision_versions_and_validity_are_separate(tmp_path,flags,expected):
+    sources,args=fixture(tmp_path)
+    rows=[statistic(f'2024-10-01T{18+i:02d}:00:00Z',flags=f,seq=i+1)
+          for i,f in enumerate(flags)]
+    stats=source(tmp_path,'statistics',rows,'precision_semantics')
+    result=settlement_versions_at([stats],contract_id='ESZ4',instrument_id=183748,publisher_id=1,
+        session='2024-10-01',decision_at='2024-10-01T21:30:00Z',reference_evidence=args['reference_evidence'])
+    assert result['settlement']==expected
+    if flags==[3,7]:
+        assert result['capture_available_at'].startswith('2024-10-01T18:00:00')
+
+
+def test_same_capture_identical_clearing_observations_are_idempotent(tmp_path):
+    sources,args=fixture(tmp_path)
+    rows=[statistic('2024-10-01T18:00:00Z',seq=1),statistic('2024-10-01T18:00:00Z',seq=2)]
+    stats=source(tmp_path,'statistics',rows,'duplicate_observation')
+    result=settlement_versions_at([stats],contract_id='ESZ4',instrument_id=183748,publisher_id=1,
+        session='2024-10-01',decision_at='2024-10-01T18:30:00Z',reference_evidence=args['reference_evidence'])
+    assert result['settlement']=='100' and not result['ambiguous_latest_batch']
+    assert len(result['versions_visible_at_cutoff'])==2
+
+
+def test_delete_is_scoped_to_precision_and_does_not_resurrect_final(tmp_path):
+    sources,args=fixture(tmp_path)
+    rows=[statistic('2024-10-01T18:00:00Z'),
+        statistic('2024-10-01T19:00:00Z',flags=7,action=2,seq=2),
+        statistic('2024-10-01T20:00:00Z',flags=3,action=2,seq=3)]
+    stats=source(tmp_path,'statistics',rows,'precision_delete')
+    kwargs=dict(contract_id='ESZ4',instrument_id=183748,publisher_id=1,session='2024-10-01',
+        reference_evidence=args['reference_evidence'])
+    assert settlement_versions_at([stats],decision_at='2024-10-01T19:30:00Z',**kwargs)['settlement']=='100'
+    assert settlement_versions_at([stats],decision_at='2024-10-01T20:30:00Z',**kwargs)['settlement'] is None
 
 
 def test_integration_binds_sources_but_never_qualifies_or_backdates_final(tmp_path):

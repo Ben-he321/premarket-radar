@@ -70,14 +70,20 @@ def verify_session_derivation(value, *, source_root, raw_hashes, registry_row=No
     reference = _evidence(value['integration_inputs']['reference_evidence'], source_root)
     temporal = value.get('temporal')
     policy = _evidence(temporal['temporal_evidence'], source_root) if temporal else None
+    context_entry=value['integration_inputs'].get('qualification_context')
+    context=_evidence(context_entry,source_root) if context_entry else None
+    if context is not None:
+        context_value=context.read(kind='F0_CONTINUOUS_SOURCE_CONTEXT')
+        if any(x['source_sha256'] not in raw_hashes for x in context_value['sources']):
+            raise ValueError('QUALIFICATION_CONTEXT_RAW_OBJECT_NOT_IN_MANIFEST')
     rebuilt = integrate_session(sources,
         window=DatedSession(value['contract_id'], date.fromisoformat(value['session']), calendar),
         decision_at=value['decision_at'], registry_row=row, boundary_evidence=boundary,
-        reference_evidence=reference, causality_evidence=policy, guard=guard)
+        reference_evidence=reference, causality_evidence=policy,qualification_context=context, guard=guard)
     if rebuilt != value:
         raise ValueError('SESSION_DERIVATION_RECOMPUTATION_MISMATCH')
     # Evidence could change while raw records were being streamed.
-    for evidence in (calendar, boundary, reference, policy):
+    for evidence in (calendar, boundary, reference, policy, context):
         if evidence is not None and digest(evidence.path) != evidence.sha256:
             raise ValueError('DERIVATION_EVIDENCE_CHANGED_DURING_READ')
     for entry in entries:
@@ -98,6 +104,10 @@ def verify_bar_derivation(item, value):
         raise ValueError('DERIVATION_HAS_NO_COMPLETE_SESSION_BAR')
     numeric = {'open', 'high', 'low', 'close', 'settlement'}
     review_fields = {'status', 'tradable_open', 'tradable_stop', 'session_verified', 'settlement_reference_at'}
+    if value['integration_inputs'].get('qualification_context'):
+        review_fields=set()
+        if value.get('research_qualified') is not True:
+            raise ValueError('RECOMPUTED_QUALIFICATION_FAILED')
     for key, expected in candidate.items():
         if key in review_fields:
             continue

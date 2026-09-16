@@ -89,7 +89,7 @@ class FuturesEngine:
             return "INVALID_SESSION_AVAILABILITY"
         if bar.availability_basis == 'INTERNAL_CAPTURE_PREFIX':
             if (not bar.temporal_evidence_hash or bar.input_cutoff != bar.closes_at
-                    or bar.internal_calculated_at != bar.input_cutoff
+                    or bar.internal_calculated_at != max(bar.input_cutoff,bar.calendar_confirmed_at or bar.input_cutoff)
                     or bar.available_at != bar.internal_calculated_at
                     or bar.supplier_published_at is not None or bar.received_at is not None):
                 return "CAPTURE_PREFIX_CLOCK_EVIDENCE_INVALID"
@@ -145,7 +145,8 @@ class FuturesEngine:
             return "OUTSIDE_FROZEN_EXECUTION_MARKET_ROOTS"
         if spec.multiplier <= 0 or spec.tick_size <= 0:
             return "INVALID_CONTRACT_UNITS"
-        if not spec.listed <= session <= spec.last_trade:
+        eligible=spec.eligible_from or spec.listed
+        if eligible is None or not eligible <= session <= spec.last_trade:
             return "OUTSIDE_ACTUAL_CONTRACT_LIFETIME"
         if not spec.boundary_verified or spec.safe_exit_session is None:
             return "DELIVERY_BOUNDARY_UNKNOWN"
@@ -806,6 +807,12 @@ class FuturesEngine:
         self.signal_contract[market] = signal.contract_id
         self.indicator_sessions[market] = signal.session
         features = indicator.update(signal.high, signal.low, signal.close)
+        self._event('DAILY_FEATURES_EVALUATED',at,market=market,session=str(signal.session),
+                    contract_id=signal.contract_id,input_hash=signal.source_hash,
+                    atr20=features.atr,prior55_high=features.entry_high,prior55_low=features.entry_low,
+                    prior20_high=features.exit_high,prior20_low=features.exit_low,
+                    entry_warmup_complete=features.entry_high is not None,
+                    signal_close=signal.close)
         p = self.positions.get(market)
         execution_closes = tuple((b.contract_id, b.close) for b in bars)
         if p is not None:
@@ -872,6 +879,10 @@ class FuturesEngine:
     def _settle(self, market, bar, at):
         p = self.positions.get(market)
         if p is None or p.contract_id != bar.contract_id:
+            self._event('SETTLEMENT_NO_HELD_CONTRACT',at,market=market,contract_id=bar.contract_id,
+                session=str(bar.session),settlement=bar.settlement,amount=0.0,
+                settlement_reference_at=bar.settlement_reference_at.isoformat() if bar.settlement_reference_at else None,
+                input_hash=bar.source_hash,reason='NO_MATCHING_OPEN_POSITION_NO_CASH_TRANSFER')
             return
         spec = self.specs[p.contract_id]
         reference = bar.settlement_reference_at or bar.closes_at  # Mock-only explicit engineering fallback.

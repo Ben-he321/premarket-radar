@@ -36,7 +36,8 @@ def decide_roll(old_spec, new_spec, overlaps, *, decision_at, next_session,
         raise ValueError('ROLL_SAFE_DATE_UNKNOWN')
     if new_spec.last_trade <= old_spec.last_trade or next_session >= new_spec.safe_exit_session:
         raise ValueError('ROLL_TARGET_NOT_VALID_NEXT_EXPIRY')
-    if not new_spec.listed <= next_session:
+    eligible=new_spec.eligible_from or new_spec.listed
+    if eligible is None or not eligible <= next_session:
         raise ValueError('ROLL_TARGET_NOT_YET_LISTED')
     pairs = tuple(overlaps)
     if not 1 <= len(pairs) <= 2:

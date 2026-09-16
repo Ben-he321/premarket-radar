@@ -37,7 +37,7 @@ class DatedSession:
     session: date
     evidence: EvidenceFile
 
-    def read(self):
+    def read(self, *, guard=None):
         if not RAW_SYMBOL.fullmatch(self.contract_id) or not date(2021, 1, 1) <= self.session <= date(2025, 12, 31):
             raise ValueError('SPECIFIC_CONTRACT_AND_FROZEN_DATE_REQUIRED')
         value = self.evidence.read(kind='DATED_SESSION_INPUT_CANDIDATE',
@@ -53,7 +53,20 @@ class DatedSession:
             if start >= end or start % MINUTE or end % MINUTE or previous is not None and start <= previous:
                 raise ValueError('INVALID_OR_OVERLAPPING_SESSION_SEGMENTS')
             previous = end
-        if segments[-1][1] - segments[0][0] > 24 * HOUR:
+        if value.get('calendar_basis') == 'GLBX_STATUS_SESSION_RESET_COHORT':
+            from .qualification import load_context,realized_calendar
+            entry=value['source_context']
+            context,catalog=load_context(EvidenceFile(Path(entry['path']),entry['sha256'],entry['source']),guard=guard)
+            cohorts=realized_calendar(catalog,contract_id=self.contract_id,identity=tuple(value['identity']))
+            actual=next((x for x in cohorts if x['session']==str(self.session)),None)
+            if actual is None or actual!=value.get('cohort') or actual['segments']!=raw:
+                raise ValueError('DATED_CALENDAR_RAW_STATUS_REPLAY_MISMATCH')
+            if any(value.get(k)!=actual.get(k) for k in ('next_session','next_open')):
+                raise ValueError('DATED_CALENDAR_NEXT_SESSION_RAW_REPLAY_MISMATCH')
+            maximum=72*HOUR
+        else:
+            maximum=24*HOUR
+        if segments[-1][1] - segments[0][0] > maximum:
             raise ValueError('SESSION_ENVELOPE_EXCEEDS_ONE_DAY')
         if timestamp(iso_ns(segments[-1][1])).astimezone(ZoneInfo('America/Chicago')).date() != self.session:
             raise ValueError('EXCHANGE_TRADE_DATE_MISMATCH')
@@ -88,7 +101,10 @@ def _sources(sources, contract_id):
     return output
 
 
-def _rows(sources, schema, *, identity=None, guard=None):
+def _rows(sources, schema, *, identity=None, guard=None, catalog=None):
+    if catalog is not None:
+        yield from catalog.rows(schema,identity=identity)
+        return
     def stream(source):
         for row in source.records(guard=guard):
             if row['parse_status'] != 'PARSED_VENDOR_RECORD':
@@ -100,9 +116,13 @@ def _rows(sources, schema, *, identity=None, guard=None):
     yield from heapq.merge(*streams, key=lambda row: (row[index], row['source_sha256'], row['source_line']))
 
 
-def _definition(sources, contract_id, start, end, cutoff, guard):
+def _definition(sources, contract_id, start, end, cutoff, guard, *, catalog=None):
     chosen, versions, identity, issues = None, [], None, []
-    for row in _rows(sources, 'definition', guard=guard):
+    semantic=('publisher_id','instrument_id','raw_symbol','instrument_class','security_type',
+              'currency','settl_currency','exchange','asset','unit_of_measure','activation','expiration',
+              'min_price_increment','display_factor','unit_of_measure_qty','contract_multiplier',
+              'leg_count','secsubtype','user_defined_instrument','identity_status')
+    for row in _rows(sources, 'definition', guard=guard,catalog=catalog):
         if row['raw_symbol'] != contract_id or row['ts_recv_ns'] > cutoff:
             continue
         current = row['publisher_id'], row['instrument_id']
@@ -115,7 +135,8 @@ def _definition(sources, contract_id, start, end, cutoff, guard):
                              activation=row['activation'], expiration=row['expiration']))
         if row['ts_recv_ns'] <= start:
             chosen = row
-        elif row['ts_recv_ns'] < end:
+        elif row['ts_recv_ns'] < end and (chosen is None or row['security_update_action'] not in ('A','M')
+                                        or any(row.get(k)!=chosen.get(k) for k in semantic)):
             issues.append('INTRASESSION_DEFINITION_VERSION_REVIEW_REQUIRED')
     if chosen is None:
         raise ValueError('NO_DEFINITION_OBSERVED_BY_SESSION_OPEN')
@@ -128,7 +149,7 @@ def _definition(sources, contract_id, start, end, cutoff, guard):
     return chosen, versions, sorted(set(issues))
 
 
-def _aggregate(sources, identity, segments, guard):
+def _aggregate(sources, identity, segments, guard, *, catalog=None, contract_id=None):
     """Use whole hours inside segments; only minute data may cover cut hours."""
     expected_hours, expected_minutes, partial = set(), set(), []
     for start, end in segments:
@@ -142,7 +163,7 @@ def _aggregate(sources, identity, segments, guard):
                 partial.append([iso_ns(a), iso_ns(b)])
     selected, crossed = {}, []
     for schema, expected, width in (('ohlcv-1h', expected_hours, HOUR), ('ohlcv-1m', expected_minutes, MINUTE)):
-        for row in _rows(sources, schema, identity=identity, guard=guard):
+        for row in _rows(sources, schema, identity=identity, guard=guard,catalog=catalog):
             at = row['ts_event_ns']
             if at not in expected:
                 if schema == 'ohlcv-1h' and any(at < b and at + width > a for a, b in segments):
@@ -168,18 +189,29 @@ def _aggregate(sources, identity, segments, guard):
         volume = None if volume is None or row['volume'] is None else volume + row['volume']
         references.append(dict(**_ref(row), bucket_start=row['ts_event'], schema=row['schema']))
     observed = None if prices is None else dict(**{k: str(v) for k, v in prices.items()}, volume=volume)
-    complete = not missing_hours and not missing_minutes and observed is not None and volume is not None
+    missing_classification=[]
+    for schema,items,width in [('ohlcv-1h',missing_hours,HOUR),('ohlcv-1m',missing_minutes,MINUTE)]:
+        for at in items:
+            proof=(catalog.interval_coverage(contract_id,schema,at,at+width) if catalog else None)
+            status=('NO_REPORTED_TRADES_IN_COMPLETE_VENDOR_RESPONSE' if proof and
+                    proof['status']=='COMPLETE_REQUEST_AVAILABLE_DATASET' else
+                    proof['status'] if proof else 'UNKNOWN_NO_COVERAGE_EVIDENCE')
+            missing_classification.append(dict(schema=schema,start=iso_ns(at),end=iso_ns(at+width),
+                                                status=status,request_evidence=proof))
+    complete = (all(x['status']=='NO_REPORTED_TRADES_IN_COMPLETE_VENDOR_RESPONSE' for x in missing_classification)
+                and observed is not None and volume is not None)
     return dict(session_ohlcv=observed if complete else None, observed_partial_ohlcv=observed,
         price_coverage='COMPLETE_OBSERVED_BUCKETS' if complete else 'INCOMPLETE_NOT_FILLED',
         expected_hour_buckets=len(expected_hours), expected_boundary_minutes=len(expected_minutes),
         selected_bucket_count=len(selected), missing_hour_buckets=[iso_ns(x) for x in missing_hours],
         missing_boundary_minutes=[iso_ns(x) for x in missing_minutes], boundary_minute_intervals=partial,
         excluded_cross_boundary_hours=crossed, records=references,
+        absent_bucket_classification=missing_classification,
         available_at=None, causal_prefix_status='UNKNOWN_HISTORICAL_BAR_CORRECTIONS_AND_AVAILABILITY')
 
 
 def settlement_versions_at(sources, *, contract_id, instrument_id, publisher_id,
-                           session, decision_at, reference_evidence, guard=None):
+                           session, decision_at, reference_evidence, guard=None,catalog=None):
     """Select the latest visible version; deletes/nonfinal replacements invalidate.
 
     ts_ref is only a UTC date label. ts_recv bounds an observed capture prefix,
@@ -190,60 +222,46 @@ def settlement_versions_at(sources, *, contract_id, instrument_id, publisher_id,
     if not date(2021, 1, 1) <= session <= date(2025, 12, 31):
         raise ValueError('SETTLEMENT_OUTSIDE_FROZEN_SESSION')
     sources = _sources(sources, contract_id)
-    cutoff, versions, latest, order = timestamp_ns(decision_at), [], None, None
-    ambiguous_latest_batch = False
-    for row in _rows(sources, 'statistics', identity=(publisher_id, instrument_id), guard=guard):
-        if row['ts_recv_ns'] > cutoff:
-            continue
-        if row['stat_type'] != 3:
+    from .settlement import SettlementState
+    cutoff, versions, state = timestamp_ns(decision_at), [], SettlementState()
+    for row in _rows(sources, 'statistics', identity=(publisher_id, instrument_id), guard=guard,catalog=catalog):
+        if row['ts_recv_ns'] > cutoff or row['stat_type'] != 3:
             continue
         if row['reference_session_hint'] is None:
             raise ValueError('SETTLEMENT_REFERENCE_DATE_AMBIGUOUS')
         if row['reference_session_hint'] != str(session):
             continue
-        key = row['ts_recv_ns'], row['sequence'], row['channel_id']
-        if order is not None and key[0] == order[0]:
-            # Trading-tick and clearing-tick variants can share a packet. Keep
-            # both records, but never pick by CSV order or the favorable value.
-            # A different sequence/channel at the same capture time cannot
-            # clear ambiguity: merged file order is not cross-channel order.
-            ambiguous_latest_batch = True
-        else:
-            ambiguous_latest_batch = False
-        order = key
         if len(versions) >= 512:
             raise ValueError('SETTLEMENT_VERSION_COUNT_BOUNDARY')
+        state.add(row)
         versions.append(dict(**_ref(row), capture_at=row['ts_recv'], event_at=row['ts_event'],
             reference_date=row['reference_session_hint'], ts_ref=row['ts_ref'], price=row['price'],
             action=row['update_action'], flags=row['settlement_flags'], sequence=row['sequence'],
             channel_id=row['channel_id'], publisher_send_at=row['publisher_send_at'],
             publisher_send_time_status=row['publisher_send_time_status']))
-        latest = row
-    value, status = None, 'NO_SETTLEMENT_MESSAGE_VISIBLE_AT_CUTOFF'
-    if latest is not None:
-        flags = latest['settlement_flags']
-        status = 'LATEST_VISIBLE_VERSION_NOT_FINAL_ACTUAL_EOD'
-        if ambiguous_latest_batch:
-            status = 'MULTIPLE_SETTLEMENT_VARIANTS_REQUIRE_EXPLICIT_REVIEW'
-        elif latest['update_action'] == 2:
-            status = 'LATEST_VISIBLE_VERSION_DELETED'
-        elif (latest['price'] is not None and flags['final'] and flags['actual'] and
-              not flags['intraday'] and not flags['unknown_bits']):
-            if latest['ts_event_ns'] is None or latest['ts_event_ns'] > latest['ts_recv_ns']:
-                status = 'SETTLEMENT_EVENT_CAPTURE_ORDER_UNKNOWN'
-            else:
-                value, status = latest['price'], 'FINAL_ACTUAL_EOD_CAPTURE_PREFIX_CANDIDATE'
-    return dict(session=str(session), decision_at=iso_ns(cutoff), status=status, settlement=value,
-        latest_visible_message=versions[-1] if versions and not ambiguous_latest_batch else None,
-        versions_visible_at_cutoff=versions, ambiguous_latest_batch=ambiguous_latest_batch,
-        capture_available_at=latest['ts_recv'] if value is not None else None,
+    chosen, status = state.account_candidate()
+    chain = state.clearing_chain
+    latest_message = None
+    if chain is not None and not chain['ambiguous']:
+        ref = _ref(chain['row'])
+        latest_message = next(v for v in versions if all(v[k] == x for k,x in ref.items()))
+    return dict(session=str(session), decision_at=iso_ns(cutoff), status=status,
+        settlement=chosen['price'] if chosen is not None else None,
+        latest_visible_message=latest_message,
+        versions_visible_at_cutoff=versions,
+        ambiguous_latest_batch=bool(chain and chain['ambiguous']),
+        capture_available_at=chosen['ts_recv'] if chosen is not None else None,
+        selection_semantics='CLEARING_FINAL_ACTUAL_EOD_SEPARATE_FROM_TRADING_PRECISION',
+        precision_chains=[dict(trading_tick=k[0], intraday=k[1],
+            latest_record=_ref(v['row']), ambiguous=v['ambiguous']) for k,v in sorted(state.chains.items())],
         historical_customer_available_at=None, settlement_pricing_reference_at=None,
         reference_date_semantics=_evidence_ref(reference_evidence), research_qualified=False)
 
 
-def _status(sources, identity, start, end, cutoff, guard):
+
+def _status(sources, identity, start, end, cutoff, guard, *, catalog=None):
     opening, events = None, []
-    for row in _rows(sources, 'status', identity=identity, guard=guard):
+    for row in _rows(sources, 'status', identity=identity, guard=guard,catalog=catalog):
         if row['ts_recv_ns'] > min(cutoff, end):
             continue
         event = dict(**_ref(row), capture_at=row['ts_recv'], event_at=row['ts_event'],
@@ -297,7 +315,7 @@ def boundary_candidate(evidence, *, contract_id, definition, registry_row):
         live_execution_eligible=False, research_qualified=False)
 
 
-def capture_prefix_clock(evidence, *, start, end, used_schemas):
+def capture_prefix_clock(evidence, *, start, end, used_schemas, calendar_confirmed_at=None):
     """Validate documented input-clock semantics and bind the policy hash.
 
     The cutoff has a separate AFTER_INPUT_CUTOFF logical phase. No numerical
@@ -332,9 +350,10 @@ def capture_prefix_clock(evidence, *, start, end, used_schemas):
                 or not 0 < path.stat().st_size <= 2 * 1024**2):
             raise ValueError('CAPTURE_PREFIX_SOURCE_REVIEW_MISSING_OR_OUTSIDE_POLICY_DIRECTORY')
         source_review.append(dict(path=str(path), sha256=digest(path)))
-    calculated = iso_ns(end)
+    calculated = iso_ns(max(end,timestamp_ns(calendar_confirmed_at))) if calendar_confirmed_at else iso_ns(end)
     return dict(availability_basis='INTERNAL_CAPTURE_PREFIX', input_cutoff=iso_ns(end),
         internal_calculated_at=calculated, available_at=calculated,
+        calendar_confirmed_at=calendar_confirmed_at,
         supplier_published_at=None, received_at=None,
         temporal_evidence_hash=evidence.sha256, temporal_evidence=_evidence_ref(evidence),
         source_review_documents=source_review,
@@ -346,7 +365,7 @@ def capture_prefix_clock(evidence, *, start, end, used_schemas):
 
 
 def integrate_session(sources, *, window, decision_at, registry_row, boundary_evidence,
-                      reference_evidence, causality_evidence=None, guard=None):
+                      reference_evidence, causality_evidence=None, qualification_context=None, guard=None):
     """Build fields for independent import review, never self-approve eligibility.
 
     A documented causal-prefix policy can resolve the temporal layer. Remaining
@@ -355,25 +374,37 @@ def integrate_session(sources, *, window, decision_at, registry_row, boundary_ev
     """
     if guard:
         guard.check({'stage': 'integrate_dated_session', 'contract_id': window.contract_id})
-    calendar, segments = window.read()
+    calendar, segments = window.read(guard=guard)
     cutoff, start, end = timestamp_ns(decision_at), segments[0][0], segments[-1][1]
     if cutoff < start:
         raise ValueError('DECISION_BEFORE_SESSION_OPEN')
     source_objects = tuple(sources)
     selected_sources = _sources(source_objects, window.contract_id)
-    definition, versions, definition_issues = _definition(selected_sources, window.contract_id, start, end, cutoff, guard)
+    context,catalog=None,None
+    if qualification_context is not None:
+        from .qualification import load_context
+        context,catalog=load_context(qualification_context,guard=guard)
+        actual={r['request_sha256'] for _,r in selected_sources}
+        required={r['request_sha256'] for _,r in catalog.sources if window.contract_id in r['request']['symbols'].split(',')}
+        if actual!=required:raise ValueError('QUALIFICATION_AND_PRICE_SOURCE_SETS_DIFFER')
+        if calendar.get('source_context')!=_evidence_ref(qualification_context):
+            raise ValueError('QUALIFICATION_CALENDAR_CONTEXT_MISMATCH')
+    definition, versions, definition_issues = _definition(selected_sources, window.contract_id, start, end, cutoff, guard,catalog=catalog)
     units = compare_definition(definition, registry_row)
     identity = definition['publisher_id'], definition['instrument_id']
-    aggregation = _aggregate(selected_sources, identity, segments, guard)
+    if catalog is not None and tuple(calendar.get('identity',()))!=identity:
+        raise ValueError('CALENDAR_DEFINITION_IDENTITY_MISMATCH')
+    aggregation = _aggregate(selected_sources, identity, segments, guard,catalog=catalog,contract_id=window.contract_id)
     temporal = None
     if causality_evidence is not None:
         temporal = capture_prefix_clock(causality_evidence, start=start, end=end,
-            used_schemas={record['schema'] for record in aggregation['records']})
+            used_schemas={record['schema'] for record in aggregation['records']},
+            calendar_confirmed_at=calendar.get('cohort',{}).get('calendar_confirmed_at'))
         aggregation['available_at'] = temporal['available_at']
         aggregation['causal_prefix_status'] = 'DOCUMENTED_CAPTURE_PREFIX_POLICY_BOUND_TO_SOURCE_RECORDS'
     settlement = settlement_versions_at(source_objects, contract_id=window.contract_id,
         instrument_id=identity[1], publisher_id=identity[0], session=window.session,
-        decision_at=decision_at, reference_evidence=reference_evidence, guard=guard)
+        decision_at=decision_at, reference_evidence=reference_evidence, guard=guard,catalog=catalog)
     boundaries = boundary_candidate(boundary_evidence, contract_id=window.contract_id,
         definition=definition, registry_row=registry_row)
     issues = [
@@ -405,7 +436,7 @@ def integrate_session(sources, *, window, decision_at, registry_row, boundary_ev
                       source_status=calendar.get('source_status', 'UNKNOWN')),
         definition=dict(selected_record=_ref(definition), versions_observed_by_cutoff=versions, units=units),
         prices=aggregation, temporal=temporal, settlement=settlement,
-        execution_status=_status(selected_sources, identity, start, end, cutoff, guard),
+        execution_status=_status(selected_sources, identity, start, end, cutoff, guard,catalog=catalog),
         boundaries=boundaries, qualification_issues=issues,
         permitted_assumption_layers=dict(initial_margin_fractions=['0.10', '0.20'],
             maintenance_fraction_of_initial='0.75', commission_usd_per_contract_side='2',
@@ -421,6 +452,11 @@ def integrate_session(sources, *, window, decision_at, registry_row, boundary_ev
                       schema=r['request']['schema'], request_start=r['request']['start'],
                       request_end=r['request']['end'], download_received_at=r['received_at'])
                  for s, r in selected_sources])
+    if qualification_context is not None:
+        from .qualification import qualify_session
+        result['integration_inputs']['qualification_context']=_evidence_ref(qualification_context)
+        qualify_session(result,catalog=catalog,context=context,calendar=calendar,definition=definition,
+                        registry_row=registry_row,definition_issues=definition_issues)
     result['derivation_sha256'] = canonical_hash(result)
     # The importer must validate the session derivation against its raw sources;
     # a many-file session has no honest single raw-object hash. Retain both.
@@ -430,10 +466,14 @@ def integrate_session(sources, *, window, decision_at, registry_row, boundary_ev
         opens_at=iso_ns(start), closes_at=iso_ns(end), available_at=aggregation['available_at'],
         **ohlcv, source_hash=result['derivation_sha256'], received_at=None,
         settlement=settlement['settlement'], settlement_available_at=settlement['capture_available_at'],
-        settlement_reference_at=None, status='UNQUALIFIED_DATED_SESSION_INPUT',
-        tradable_open=False, tradable_stop=False, session_verified=False, is_mock=False,
+        settlement_reference_at=settlement['settlement_pricing_reference_at'],
+        status='QUALIFIED' if result['research_qualified'] else 'UNQUALIFIED_DATED_SESSION_INPUT',
+        tradable_open=result['execution_status']['tradable_open'],
+        tradable_stop=result['execution_status']['tradable_stop'],
+        session_verified=result['research_qualified'], is_mock=False,
         next_session=calendar.get('next_session'),
         **{key: temporal[key] if temporal else None for key in
-           ('availability_basis', 'input_cutoff', 'internal_calculated_at', 'supplier_published_at', 'temporal_evidence_hash')})
+           ('availability_basis', 'input_cutoff', 'internal_calculated_at', 'supplier_published_at', 'temporal_evidence_hash',
+            'calendar_confirmed_at')})
     result['raw_source_object_hashes'] = sorted({record['source_sha256'] for record in aggregation['records']})
     return result
