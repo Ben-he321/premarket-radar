@@ -87,6 +87,18 @@ class FuturesEngine:
             return "UNKNOWN_OR_NAIVE_AVAILABILITY"
         if not bar.opens_at < bar.closes_at <= bar.available_at:
             return "INVALID_SESSION_AVAILABILITY"
+        if bar.availability_basis == 'INTERNAL_CAPTURE_PREFIX':
+            if (not bar.temporal_evidence_hash or bar.input_cutoff != bar.closes_at
+                    or bar.internal_calculated_at != bar.input_cutoff
+                    or bar.available_at != bar.internal_calculated_at
+                    or bar.supplier_published_at is not None or bar.received_at is not None):
+                return "CAPTURE_PREFIX_CLOCK_EVIDENCE_INVALID"
+        elif bar.availability_basis != 'SUPPLIER_PUBLICATION':
+            return "UNKNOWN_AVAILABILITY_BASIS"
+        elif any(value is not None for value in (bar.input_cutoff, bar.internal_calculated_at, bar.temporal_evidence_hash)):
+            return "SUPPLIER_CLOCK_CANNOT_HIDE_INTERNAL_CAPTURE_PREFIX"
+        elif bar.supplier_published_at is not None and bar.supplier_published_at != bar.available_at:
+            return "SUPPLIER_PUBLICATION_CLOCK_MISMATCH"
         if bar.next_session is not None and bar.next_session <= bar.session:
             return "INVALID_NEXT_EXCHANGE_SESSION"
         if bar.received_at is not None and not self._aware(bar.received_at):
@@ -850,7 +862,12 @@ class FuturesEngine:
                                       execution_session=signal.next_session)
         self._event("SIGNAL_CREATED", at, market=market, direction=direction,
                     session=str(signal.session), signal_hash=signal.source_hash,
-                    received_at=signal.received_at.isoformat() if signal.received_at else "UNKNOWN")
+                    received_at=signal.received_at.isoformat() if signal.received_at else "UNKNOWN",
+                    availability_basis=signal.availability_basis,
+                    input_cutoff=signal.input_cutoff.isoformat() if signal.input_cutoff else None,
+                    internal_calculated_at=signal.internal_calculated_at.isoformat() if signal.internal_calculated_at else None,
+                    supplier_published_at=signal.supplier_published_at.isoformat() if signal.supplier_published_at else None,
+                    temporal_evidence_hash=signal.temporal_evidence_hash)
 
     def _settle(self, market, bar, at):
         p = self.positions.get(market)

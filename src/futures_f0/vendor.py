@@ -143,7 +143,11 @@ class RawSource:
         if timestamp(receipt['completed_at']) < timestamp(receipt['received_at']):
             raise ValueError('INVALID_DOWNLOAD_RECEIPT_TIMES')
         fmt = receipt.get('csv_format', {})
-        if 'pretty_px' in fmt and fmt['pretty_px'] is not (self.price_encoding == 'decimal'):
+        # HTTP CSV get_range defaults to pretty_px=false. Legacy receipts from
+        # our fixed-format downloader omit csv_format, never implying decimal.
+        # Explicit decimal exports must carry their true/false format evidence.
+        pretty = fmt.get('pretty_px', False)
+        if type(pretty) is not bool or pretty is not (self.price_encoding == 'decimal'):
             raise ValueError('PRICE_ENCODING_DISAGREES_WITH_RECEIPT')
         return receipt
 

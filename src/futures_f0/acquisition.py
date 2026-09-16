@@ -46,6 +46,37 @@ class Continuation:
         self.session.close()
         self.client.session.close()
 
+    def _inherit_metadata(self, name):
+        """Copy a hash-pinned prior round record, never redate or refetch it."""
+        target = self.output / 'metadata' / name
+        if target.exists():
+            return target
+        previous = self.state.get('previous_round')
+        if not previous:
+            return target
+        prior = Path(previous).resolve()
+        if prior == self.output or not prior.is_relative_to(self.config.data_dir / 'continuations'):
+            raise ValueError('PRIOR_ROUND_PATH_INVALID')
+        preservation = self.output / 'preservation' / 'PRIOR_ROUND_HASHES.json'
+        if not preservation.is_file():
+            raise ValueError('PRIOR_ROUND_HASH_MANIFEST_REQUIRED')
+        inventory = json.loads(preservation.read_text(encoding='utf-8-sig'))
+        key = str(Path('metadata') / name)
+        pin = inventory.get(key) or inventory.get(key.replace('\\', '/'))
+        source = prior / 'metadata' / name
+        if pin is None or not source.exists():
+            return target
+        if source.stat().st_size != pin['bytes'] or digest(source) != pin['sha256']:
+            raise ValueError('PRIOR_METADATA_CHANGED_NO_AUTO_REFETCH')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open('xb') as stream:
+            stream.write(source.read_bytes())
+        write_json(self.output / 'metadata_reuse' / name,
+                   dict(source=str(source), source_sha256=pin['sha256'],
+                        target_sha256=digest(target), copied_at=utcnow().isoformat(),
+                        original_received_at_preserved=True, network_requests=0), immutable=True)
+        return target
+
     def metadata(self, method, parameters):
         allowed = {'metadata.get_dataset_range', 'metadata.list_schemas',
                    'metadata.list_fields', 'metadata.get_dataset_condition', 'symbology.resolve'}
@@ -53,6 +84,8 @@ class Continuation:
             raise ValueError('FREE_METADATA_SCOPE_REJECTED')
         identity = canonical_hash({'method': method, 'parameters': parameters})
         path = self.output / 'metadata' / (identity + '.json')
+        if method != 'metadata.get_dataset_range':
+            self._inherit_metadata(path.name)
         # Historical schema/identity responses are reusable; account range is
         # read freshly for each separate process when used for permissions.
         if path.exists() and method != 'metadata.get_dataset_range':
@@ -145,6 +178,7 @@ class Continuation:
         mapping_parameters = self._symbol_parameters(request)
         mapping_id = canonical_hash(dict(method='symbology.resolve', parameters=mapping_parameters))
         mapping_path = self.output / 'metadata' / (mapping_id + '.json')
+        self._inherit_metadata(mapping_path.name)
         if not mapping_path.exists():
             raise ValueError('ACQUISITION_CACHED_MAPPING_EVIDENCE_MISSING')
         mapping = json.loads(mapping_path.read_text(encoding='utf-8'))
@@ -222,6 +256,7 @@ def main(argv=None):
     parser.add_argument('--round-dir', required=True)
     parser.add_argument('--request-plan', required=True)
     parser.add_argument('--credit-evidence', required=True)
+    parser.add_argument('--previous-credit-evidence', help='Explicit append-only authorization renewal; never resets the original budget')
     args = parser.parse_args(argv)
     from .budget import BudgetGate
     continuation = Continuation(args.round_dir)
@@ -234,8 +269,16 @@ def main(argv=None):
         raise ValueError('BOUNDED_REQUEST_PLAN_REQUIRED')
     for row in plan:
         Request(tuple(row['symbols']), row['schema'], row['start'], row['end']).parameters()
+    authorization = output / 'AUTHORIZATION.json'
     budget = BudgetGate(continuation.config.data_dir, args.credit_evidence,
-                        deadline=continuation.state['hard_deadline_utc'])
+                        deadline=continuation.state['hard_deadline_utc'],
+                        **({'round_state': output / 'ROUND_STATE.json', 'authorization': authorization}
+                           if authorization.exists() else {}))
+    if args.previous_credit_evidence:
+        first = plan[0]
+        budget.authorize_continuation(Request(tuple(first['symbols']), first['schema'], first['start'], first['end']).parameters(),
+                                      api_key=continuation.config.api_key,
+                                      previous_evidence_manifest=args.previous_credit_evidence)
     plan_hash = digest(plan_path)
     attempt = output / 'acquisition_attempts' / (utcnow().strftime('%Y%m%dT%H%M%S%fZ') + '_' + uuid.uuid4().hex[:8])
     write_json(attempt / 'request_plan.json', plan, immutable=True)

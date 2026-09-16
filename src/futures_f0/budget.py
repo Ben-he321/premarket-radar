@@ -7,7 +7,7 @@ archive is auditable evidence, not a cryptographic attestation by the vendor.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
@@ -26,6 +26,7 @@ ROUND_CAP = Decimal('10')
 EVIDENCE_MAX_AGE_SECONDS = 3600
 QUOTE_MAX_AGE_SECONDS = 60
 FORMAT = 'futures-f0-databento-visible-dom-v1'
+AUTHORIZATION_FORMAT = 'futures-f0-credit-continuation-authorization-v1'
 APPLICATION_SENTENCE = 'credits are automatically applied before any charges are made to the user'
 
 
@@ -134,7 +135,7 @@ class EvidenceArchive:
                 if not url.path.startswith('/portal/') or source.get('browser_session_id') != session_id:
                     raise ValueError('BUDGET_ACCOUNT_BROWSER_SESSION_MISMATCH')
                 captured_sources = [s for s in capture.get('sources', []) if s.get('file') == source['path'] and s.get('url') == source['source_url']]
-                if len(captured_sources) != 1 or _at(capture['captured_at']) != captured:
+                if len(captured_sources) != 1 or _at(captured_sources[0].get('captured_at', capture.get('captured_at'))) != captured:
                     raise ValueError('BUDGET_CAPTURE_SOURCE_ASSOCIATION_UNPROVEN')
             elif scope == 'public':
                 if not url.path.startswith('/docs/'):
@@ -234,12 +235,18 @@ class EvidenceArchive:
 class BudgetGate:
     """One durable journal for this authorized run, with no release operation."""
 
-    def __init__(self, data_dir, evidence_manifest, *, deadline):
+    def __init__(self, data_dir, evidence_manifest, *, deadline, round_state=None,
+                 authorization=None, prior_journal_prefix=None):
         self.data_dir = Path(data_dir).resolve()
         self.archive = EvidenceArchive(evidence_manifest)
         self.deadline = _at(deadline)
         self.directory = self.data_dir / 'credit_budget'
         self.journal = self.directory / 'journal.jsonl'
+        self.round_state = Path(round_state).resolve() if round_state else None
+        self.authorization = Path(authorization).resolve() if authorization else None
+        self.prior_journal_prefix = (Path(prior_journal_prefix).resolve() if prior_journal_prefix else
+                                    self.round_state.parent / 'preservation' / 'BUDGET_PREFIX.json'
+                                    if self.round_state else None)
 
     @contextmanager
     def _locked(self):
@@ -282,6 +289,213 @@ class BudgetGate:
         records.append(value)
         return value
 
+    @staticmethod
+    def _account_binding(first, evidence):
+        binding = hashlib.sha256((first['binding_salt'] + '\0' + evidence['account'] + '\0' + evidence['key_sha256']).encode()).hexdigest()
+        if binding != first['account_binding_sha256']:
+            raise ValueError('BUDGET_WRONG_ACCOUNT_OR_KEY')
+        if _money(first['round_cap_usd']) != ROUND_CAP:
+            raise ValueError('BUDGET_ORIGINAL_CAP_CHANGED')
+
+    def _preserved_archive(self, path, manifest_sha256, source_hashes):
+        """Check old bytes without making stale evidence fresh or rewriting it."""
+        path = safe_child(self.data_dir, path)
+        if digest(path) != manifest_sha256:
+            raise ValueError('BUDGET_PRESERVED_EVIDENCE_CHANGED')
+        manifest = json.loads(path.read_text(encoding='utf-8-sig'))
+        sources = dict(manifest['sources'], capture_provenance=manifest['capture_provenance'])
+        if set(sources) != set(source_hashes):
+            raise ValueError('BUDGET_PRESERVED_EVIDENCE_CHANGED')
+        paths = {path}
+        for name, source in sources.items():
+            source_path = safe_child(path.parent, source['path'])
+            if source.get('sha256') != source_hashes[name] or digest(source_path) != source_hashes[name]:
+                raise ValueError('BUDGET_PRESERVED_EVIDENCE_CHANGED')
+            paths.add(source_path)
+        return paths
+
+    def _continuation_files(self, records, *, require_full_prefix=False):
+        if not self.round_state or not self.authorization or not self.prior_journal_prefix:
+            raise ValueError('BUDGET_CONTINUATION_AUTHORIZATION_FILES_REQUIRED')
+        output = self.round_state.parent
+        base = self.data_dir / 'continuations'
+        if (output == base or not output.is_relative_to(base) or self.round_state.name != 'ROUND_STATE.json'
+                or self.authorization.parent != output or self.authorization == self.round_state
+                or not self.prior_journal_prefix.is_relative_to(output)):
+            raise ValueError('BUDGET_CONTINUATION_MUST_USE_SEPARATE_ROUND_DIRECTORY')
+        paths = dict(round_state=self.round_state, authorization=self.authorization,
+                     prior_journal_prefix=self.prior_journal_prefix)
+        raw = {name: path.read_bytes() for name, path in paths.items()}
+        hashes = {name: hashlib.sha256(value).hexdigest() for name, value in raw.items()}
+        state, authorization, prefix = (json.loads(raw[name].decode('utf-8-sig'))
+                                        for name in ('round_state', 'authorization', 'prior_journal_prefix'))
+        if (Path(state['data_root']).resolve() != self.data_dir
+                or Path(authorization['data_root']).resolve() != self.data_dir
+                or ('round_dir' in state and Path(state['round_dir']).resolve() != output)):
+            raise ValueError('BUDGET_CONTINUATION_DATA_ROOT_CHANGED')
+        start, deadline = _at(state['start_utc']), _at(state['hard_deadline_utc'])
+        if not timedelta(0) < deadline - start <= timedelta(hours=4):
+            raise ValueError('BUDGET_CONTINUATION_MAX_FOUR_HOURS')
+        if utcnow() < start:
+            raise ValueError('BUDGET_AUTHORIZATION_NOT_STARTED')
+        if utcnow() >= deadline:
+            raise ValueError('BUDGET_AUTHORIZATION_EXPIRED')
+        if deadline != self.deadline:
+            raise ValueError('BUDGET_AUTHORIZATION_OR_MONTH_CHANGED')
+        if (authorization.get('format') != AUTHORIZATION_FORMAT
+                or _at(authorization['start_utc']) != start
+                or _at(authorization['hard_deadline_utc']) != deadline
+                or authorization.get('round_state_sha256') != hashes['round_state']
+                or authorization.get('prior_journal_prefix_sha256') != hashes['prior_journal_prefix']
+                or not isinstance(authorization.get('received_scope'), str) or not authorization['received_scope'].strip()
+                or not isinstance(authorization.get('source'), str) or not authorization['source'].strip()
+                or not start <= _at(authorization['recorded_at']) < deadline):
+            raise ValueError('BUDGET_CONTINUATION_AUTHORIZATION_MISMATCH')
+        for document in (state, authorization):
+            if (_money(document.get('listed_history_budget_usd')) != ROUND_CAP
+                    or _money(document.get('cash_authorization_usd')) != 0):
+                raise ValueError('BUDGET_CONTINUATION_CAP_OR_CASH_CHANGED')
+        raw_journal = self.journal.read_bytes()
+        size, lines = prefix.get('bytes'), prefix.get('lines')
+        if (Path(prefix['path']).resolve() != self.journal
+                or type(size) is not int or size <= 0 or size > len(raw_journal)
+                or type(lines) is not int or not 1 <= lines <= len(records)
+                or not raw_journal[:size].endswith(b'\n')
+                or len(raw_journal[:size].splitlines()) != lines
+                or hashlib.sha256(raw_journal[:size]).hexdigest() != prefix.get('sha256')
+                or (require_full_prefix and size != len(raw_journal))):
+            raise ValueError('BUDGET_ORIGINAL_JOURNAL_PREFIX_CHANGED')
+        if any(digest(paths[name]) != hashes[name] for name in paths):
+            raise ValueError('BUDGET_CONTINUATION_FILE_CHANGED')
+        return dict(**{name + '_path': str(path.relative_to(self.data_dir)) for name, path in paths.items()},
+                    **{name + '_sha256': value for name, value in hashes.items()},
+                    start_utc=start.isoformat(), deadline=deadline.isoformat(),
+                    prefix_bytes=size, prefix_lines=lines, prefix_sha256=prefix['sha256'],
+                    prefix_head_sha256=records[lines - 1]['sha256'],
+                    round_cap_usd=str(ROUND_CAP), cash_authorization_usd='0')
+
+    def _preserved_history(self, records):
+        """All prior authorizations and archives remain auditably immutable."""
+        for record in records:
+            if record['event'] == 'AUTHORIZATION':
+                for name in ('round_state', 'authorization', 'prior_journal_prefix'):
+                    if digest(safe_child(self.data_dir, record[name + '_path'])) != record[name + '_sha256']:
+                        raise ValueError('BUDGET_PINNED_AUTHORIZATION_FILE_CHANGED')
+                self._preserved_archive(record['previous_evidence_manifest_path'],
+                                        record['previous_evidence_manifest_sha256'],
+                                        record['previous_source_hashes'])
+            elif record['event'] == 'EVIDENCE':
+                self._preserved_archive(record['evidence_manifest_path'], record['evidence_manifest_sha256'],
+                                        record['source_hashes'])
+
+    @staticmethod
+    def _latest(records, event):
+        return next((record for record in reversed(records) if record['event'] == event), records[0])
+
+    def _active_context(self, records, evidence, *, check_evidence=True):
+        first = records[0]
+        self._account_binding(first, evidence)
+        authorization = self._latest(records, 'AUTHORIZATION')
+        pinned = self._latest(records, 'EVIDENCE')
+        if authorization['event'] == 'OPEN':
+            if self.round_state or self.authorization:
+                raise ValueError('BUDGET_CONTINUATION_MUST_BE_EXPLICITLY_AUTHORIZED')
+            if first['deadline'] != self.deadline.isoformat() or first['month'] != evidence['month']:
+                raise ValueError('BUDGET_AUTHORIZATION_OR_MONTH_CHANGED')
+        else:
+            self._preserved_history(records)
+            files = self._continuation_files(records)
+            if any(authorization.get(name) != value for name, value in files.items()):
+                raise ValueError('BUDGET_ACTIVE_AUTHORIZATION_MISMATCH')
+            if pinned.get('authorization_sha256') != authorization['sha256']:
+                raise ValueError('BUDGET_ACTIVE_EVIDENCE_REQUIRED')
+            if (pinned.get('month') != evidence['month']
+                    or pinned['evidence_manifest_path'] != str(self.archive.path.relative_to(self.data_dir))):
+                if check_evidence:
+                    raise ValueError('BUDGET_ACTIVE_EVIDENCE_MISMATCH')
+        if check_evidence and (pinned['evidence_manifest_sha256'] != evidence['manifest_sha256']
+                               or pinned['source_hashes'] != evidence['source_hashes']):
+            raise ValueError('BUDGET_PINNED_EVIDENCE_HASH_CHANGED')
+        return authorization, pinned
+
+    def _new_evidence_record(self, evidence, authorization, previous):
+        if not self.archive.path.is_relative_to(self.round_state.parent):
+            raise ValueError('BUDGET_NEW_EVIDENCE_MUST_BE_IN_ACTIVE_ROUND')
+        previous_hash = previous['evidence_manifest_sha256']
+        if evidence['manifest_sha256'] == previous_hash:
+            raise ValueError('BUDGET_NEW_CAPTURE_REQUIRED')
+        # A recapture is a new archive; editing the old manifest's timestamps is
+        # neither a renewal nor an evidence refresh.
+        manifest = json.loads(self.archive.path.read_text(encoding='utf-8-sig'))
+        start = _at(authorization['start_utc'])
+        if any(_at(source['captured_at']) < start for source in manifest['sources'].values()
+               if source['scope'] == 'account'):
+            raise ValueError('BUDGET_NEW_ROUND_CAPTURE_REQUIRED')
+        self._preserved_archive(self.archive.path, evidence['manifest_sha256'], evidence['source_hashes'])
+        return dict(event='EVIDENCE', authorization_sha256=authorization['sha256'],
+                    previous_evidence_sha256=previous['sha256'],
+                    evidence_manifest_path=str(self.archive.path.relative_to(self.data_dir)),
+                    evidence_manifest_sha256=evidence['manifest_sha256'], source_hashes=evidence['source_hashes'],
+                    month=evidence['month'], credit_expiries=evidence['credit_expiries'],
+                    credit_expiry_conflict=evidence['credit_expiry_conflict'],
+                    credit_balance_usd=format(evidence['credit_balance_usd'], 'f'),
+                    monthly_usage_usd=format(evidence['monthly_usage_usd'], 'f'),
+                    monthly_limit_usd=format(evidence['monthly_limit_usd'], 'f'),
+                    deadline=authorization['deadline'])
+
+    def authorize_continuation(self, parameters, *, api_key, previous_evidence_manifest):
+        """Explicit append-only renewal against an immutable authorized prefix.
+
+        The caller must supply a newly captured archive and separate round,
+        authorization and prefix files. No quote or network request is made.
+        A failed or uncertain reservation always remains in the cumulative cap.
+        """
+        with self._locked():
+            records = self._read()
+            if not records:
+                raise ValueError('BUDGET_CONTINUATION_REQUIRES_EXISTING_JOURNAL')
+            self._preserved_history(records)
+            evidence = self.archive.verify(parameters, api_key, self.deadline)
+            self._account_binding(records[0], evidence)
+            files = self._continuation_files(records)
+            previous_auth = self._latest(records, 'AUTHORIZATION')
+            previous = self._latest(records, 'EVIDENCE')
+            if previous_auth.get('authorization_path') == files['authorization_path']:
+                self._active_context(records, evidence)
+                return previous_auth
+            if any(record.get('authorization_path') == files['authorization_path'] for record in records):
+                raise ValueError('BUDGET_OLD_AUTHORIZATION_CANNOT_REACTIVATE')
+            files = self._continuation_files(records, require_full_prefix=True)
+            prior_path = safe_child(self.data_dir, previous_evidence_manifest)
+            self._preserved_archive(prior_path, previous['evidence_manifest_sha256'], previous['source_hashes'])
+            if prior_path == self.archive.path:
+                raise ValueError('BUDGET_NEW_CAPTURE_REQUIRED')
+            # Validate before writing either event. A crash between the two
+            # durable appends intentionally leaves a fail-closed authorization.
+            authorization = dict(event='AUTHORIZATION', **files,
+                previous_authorization_sha256=previous_auth['sha256'],
+                account_binding_sha256=records[0]['account_binding_sha256'],
+                previous_evidence_manifest_path=str(prior_path.relative_to(self.data_dir)),
+                previous_evidence_manifest_sha256=previous['evidence_manifest_sha256'],
+                previous_source_hashes=previous['source_hashes'])
+            self._new_evidence_record(evidence, authorization | {'sha256': ''}, previous)
+            authorization = self._append(records, authorization)
+            self._append(records, self._new_evidence_record(evidence, authorization, previous))
+            return authorization
+
+    def refresh_evidence(self, parameters, *, api_key):
+        """Pin a new real capture under the current, unchanged authorization."""
+        with self._locked():
+            records = self._read()
+            if not records or self._latest(records, 'AUTHORIZATION')['event'] != 'AUTHORIZATION':
+                raise ValueError('BUDGET_EVIDENCE_REFRESH_REQUIRES_CONTINUATION_AUTHORIZATION')
+            evidence = self.archive.verify(parameters, api_key, self.deadline)
+            authorization, previous = self._active_context(records, evidence, check_evidence=False)
+            record = self._new_evidence_record(evidence, authorization, previous)
+            if any(r.get('evidence_manifest_path') == record['evidence_manifest_path'] for r in records):
+                raise ValueError('BUDGET_NEW_CAPTURE_REQUIRED')
+            return self._append(records, record)
+
     def _reserve_fresh_quote(self, parameters, estimate, *, api_key):
         """Called only with MetadataClient's newly authenticated estimate."""
         cost = _money(estimate.get('get_cost'), quote=True)
@@ -294,6 +508,8 @@ class BudgetGate:
             evidence = self.archive.verify(parameters, api_key, self.deadline)
             records = self._read()
             if not records:
+                if self.round_state or self.authorization:
+                    raise ValueError('BUDGET_CONTINUATION_REQUIRES_EXISTING_JOURNAL')
                 salt = uuid.uuid4().hex
                 binding = hashlib.sha256((salt + '\0' + evidence['account'] + '\0' + evidence['key_sha256']).encode()).hexdigest()
                 self._append(records, dict(event='OPEN', round_cap_usd=str(ROUND_CAP),
@@ -304,14 +520,7 @@ class BudgetGate:
                     credit_balance_usd=format(evidence['credit_balance_usd'], 'f'),
                     monthly_usage_usd=format(evidence['monthly_usage_usd'], 'f'),
                     monthly_limit_usd=format(evidence['monthly_limit_usd'], 'f')))
-            first = records[0]
-            binding = hashlib.sha256((first['binding_salt'] + '\0' + evidence['account'] + '\0' + evidence['key_sha256']).encode()).hexdigest()
-            if binding != first['account_binding_sha256']:
-                raise ValueError('BUDGET_WRONG_ACCOUNT_OR_KEY')
-            if first['evidence_manifest_sha256'] != evidence['manifest_sha256'] or first['source_hashes'] != evidence['source_hashes']:
-                raise ValueError('BUDGET_PINNED_EVIDENCE_HASH_CHANGED')
-            if first['deadline'] != self.deadline.isoformat() or first['month'] != evidence['month']:
-                raise ValueError('BUDGET_AUTHORIZATION_OR_MONTH_CHANGED')
+            authorization, pinned = self._active_context(records, evidence)
             reserved = [r for r in records if r['event'] == 'RESERVE']
             if any(r['request_sha256'] == request_hash for r in reserved):
                 raise ValueError('BUDGET_ALREADY_RESERVED_NO_AUTOMATIC_RETRY')
@@ -327,6 +536,7 @@ class BudgetGate:
                 request_sha256=request_hash, request=parameters, reserved_cost_usd=format(cost, 'f'),
                 cumulative_reserved_usd=format(used + cost, 'f'), available_cap_usd=format(cap, 'f'),
                 quote_path=str(quote_path.relative_to(self.data_dir)), quote_sha256=digest(quote_path),
+                authorization_sha256=authorization['sha256'], evidence_sha256=pinned['sha256'],
                 evidence_manifest_sha256=evidence['manifest_sha256'],
                 credit_applicability=evidence['applicability'], cash_authorization_usd='0'))
 
@@ -335,11 +545,16 @@ class BudgetGate:
         with self._locked():
             evidence = self.archive.verify(reservation['request'], api_key, self.deadline)
             records = self._read()
+            if not records:
+                raise ValueError('BUDGET_RESERVATION_STATE_REQUIRES_REVIEW')
+            authorization, pinned = self._active_context(records, evidence)
             matching = [r for r in records if r.get('reservation_id') == reservation['reservation_id']]
             if len(matching) != 1 or matching[0] != reservation:
                 raise ValueError('BUDGET_RESERVATION_STATE_REQUIRES_REVIEW')
-            if evidence['manifest_sha256'] != records[0]['evidence_manifest_sha256'] or evidence['source_hashes'] != records[0]['source_hashes']:
-                raise ValueError('BUDGET_PINNED_EVIDENCE_HASH_CHANGED')
+            if (reservation.get('authorization_sha256', records[0]['sha256']) != authorization['sha256']
+                    or reservation.get('evidence_sha256', records[0]['sha256']) != pinned['sha256']
+                    or reservation['evidence_manifest_sha256'] != evidence['manifest_sha256']):
+                raise ValueError('BUDGET_RESERVATION_AUTHORIZATION_OR_EVIDENCE_CHANGED')
             quote = safe_child(self.data_dir, reservation['quote_path'])
             if digest(quote) != reservation['quote_sha256']:
                 raise ValueError('BUDGET_QUOTE_ARCHIVE_HASH_CHANGED')

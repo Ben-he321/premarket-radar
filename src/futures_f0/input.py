@@ -8,11 +8,15 @@ from datetime import date
 import csv
 import json
 from pathlib import Path
+import math
 
 from .data import verify_input_manifest, timestamp, SessionWindow
 from .model import ContractSpec, SessionBar, MarketDay, RollInstruction
 from .protocol import MARKETS
 from .runtime import digest
+from .provenance import verify_session_derivation, verify_bar_derivation
+from .session_inputs import capture_prefix_clock
+from .vendor import EvidenceFile, timestamp_ns
 
 
 def small_json(path, limit=8*1024**2):
@@ -34,6 +38,7 @@ class QualifiedInputs:
         self.specs = {}
         with Path(registry_path).open(encoding='utf-8-sig', newline='') as f:
             registry = {r['root']:r for r in csv.DictReader(f)}
+        self.registry = registry
         entries = small_json(self.files['definitions'])
         if not isinstance(entries,list) or not 1 <= len(entries) <= 1000:
             raise ValueError('INVALID_BOUNDED_DEFINITIONS')
@@ -82,7 +87,7 @@ class QualifiedInputs:
             raise ValueError('PRE_LAUNCH_OR_INVALID_CONTRACT_LIFETIME')
         return spec
 
-    def _bar(self, item):
+    def _bar(self, item, guard=None):
         # Model defaults are convenient for engineering fixtures. Production
         # imports must never interpret omitted halt/limit evidence as tradable.
         explicit = {'status', 'tradable_open', 'tradable_stop', 'session_verified', 'is_mock'}
@@ -93,14 +98,67 @@ class QualifiedInputs:
         if not isinstance(item['status'], str) or not item['status']:
             raise ValueError('EXPLICIT_BAR_STATUS_REQUIRED')
         data = dict(item)
+        for name in ('open', 'high', 'low', 'close', 'settlement'):
+            if data.get(name) is not None:
+                if isinstance(data[name], bool):
+                    raise ValueError('INVALID_NORMALIZED_PRICE')
+                data[name] = float(data[name])
+                if not math.isfinite(data[name]):
+                    raise ValueError('INVALID_NORMALIZED_PRICE')
         for name in ('session','next_session'):
             if data.get(name): data[name] = date.fromisoformat(data[name])
-        for name in ('opens_at','closes_at','available_at','received_at','settlement_available_at','settlement_reference_at'):
+        for name in ('opens_at','closes_at','available_at','received_at','settlement_available_at','settlement_reference_at',
+                     'input_cutoff','internal_calculated_at','supplier_published_at'):
             if data.get(name): data[name] = timestamp(data[name])
         bar = SessionBar(**data)
+        if self.manifest.get('session_derivations') and bar.availability_basis != 'INTERNAL_CAPTURE_PREFIX':
+            raise ValueError('DERIVATION_MANIFEST_REQUIRES_CAPTURE_PREFIX_NO_RAW_FALLBACK')
+        if bar.availability_basis == 'INTERNAL_CAPTURE_PREFIX':
+            evidence_entry = self.manifest.get('temporal_evidence', {})
+            evidence_path = self.path.parent / evidence_entry.get('path', '')
+            if (not evidence_path.is_file() or not evidence_path.resolve().is_relative_to(self.path.parent)
+                    or digest(evidence_path) != evidence_entry.get('sha256')
+                    or bar.temporal_evidence_hash != evidence_entry.get('sha256')):
+                raise ValueError('CAPTURE_PREFIX_EVIDENCE_MISSING_OR_CHANGED')
+            derived_entry = self.manifest.get('session_derivations', {}).get(bar.source_hash)
+            if not isinstance(derived_entry, dict):
+                raise ValueError('CAPTURE_PREFIX_SESSION_DERIVATION_REQUIRED')
+            derived_path = (self.path.parent / derived_entry['path']).resolve()
+            if (not derived_path.is_relative_to(self.path.parent) or not derived_path.is_file()
+                    or digest(derived_path) != derived_entry['sha256']):
+                raise ValueError('SESSION_DERIVATION_FILE_CHANGED_OR_OUTSIDE_MANIFEST')
+            derived = small_json(derived_path)
+            if derived.get('derivation_sha256') != bar.source_hash:
+                raise ValueError('BAR_SESSION_DERIVATION_HASH_MISMATCH')
+            capture_prefix_clock(EvidenceFile(evidence_path, evidence_entry['sha256'], evidence_entry['source']),
+                start=timestamp_ns(item['opens_at']), end=timestamp_ns(item['closes_at']),
+                used_schemas={record['schema'] for record in derived['prices']['records']})
+            root = self.manifest.get('derivation_source_root')
+            if not root or not Path(root).is_absolute():
+                raise ValueError('EXPLICIT_DERIVATION_SOURCE_ROOT_REQUIRED')
+            expected_registry = self.registry.get(derived.get('root'))
+            if expected_registry is None:
+                raise ValueError('DERIVATION_REGISTRY_ROOT_UNKNOWN')
+            verify_session_derivation(derived, source_root=root,
+                raw_hashes=self.manifest.get('source_object_hashes', []),
+                registry_row=expected_registry, guard=guard)
+            verify_bar_derivation(item, derived)
+            if (bar.input_cutoff != bar.closes_at or bar.internal_calculated_at != bar.input_cutoff
+                    or bar.available_at != bar.internal_calculated_at or bar.supplier_published_at is not None
+                    or bar.received_at is not None):
+                raise ValueError('CAPTURE_PREFIX_CLOCKS_OR_UNKNOWN_RECEIPT_MISREPRESENTED')
+        elif bar.availability_basis != 'SUPPLIER_PUBLICATION':
+            raise ValueError('UNKNOWN_AVAILABILITY_BASIS')
+        elif any(value is not None for value in (bar.input_cutoff, bar.internal_calculated_at, bar.temporal_evidence_hash)):
+            raise ValueError('SUPPLIER_CLOCK_CANNOT_HIDE_INTERNAL_CAPTURE_PREFIX')
+        elif bar.supplier_published_at is not None and bar.supplier_published_at != bar.available_at:
+            raise ValueError('SUPPLIER_PUBLICATION_CLOCK_MISMATCH')
         spec = self.specs.get(bar.contract_id)
         if spec is None or bar.is_mock:
             raise ValueError('REAL_SPECIFIC_CONTRACT_REQUIRED')
+        if bar.availability_basis == 'INTERNAL_CAPTURE_PREFIX' and (
+                derived['root'] != spec.root or derived['market'] != spec.market):
+            raise ValueError('DERIVATION_CONTRACT_SPEC_IDENTITY_MISMATCH')
         if not date(2021,1,1) <= bar.session <= date(2025,12,31):
             raise ValueError('BAR_OUTSIDE_FROZEN_HISTORY')
         key = bar.contract_id + '|' + bar.session.isoformat()
@@ -113,12 +171,19 @@ class QualifiedInputs:
         window = SessionWindow(bar.session, calendar['timezone'], segments, calendar['source'],
                                calendar['evidence_sha256'], calendar.get('verified') is True)
         window.validate()
+        if bar.availability_basis == 'INTERNAL_CAPTURE_PREFIX':
+            actual_segments = [(timestamp_ns(a), timestamp_ns(b)) for a, b in calendar['segments']]
+            derived_segments = [(timestamp_ns(a), timestamp_ns(b)) for a, b in derived['calendar']['segments']]
+            if (actual_segments != derived_segments or
+                    calendar['evidence_sha256'] != derived['calendar']['evidence']['sha256']):
+                raise ValueError('DERIVATION_VERIFIED_CALENDAR_SEGMENTS_OR_EVIDENCE_MISMATCH')
         if bar.opens_at != segments[0][0] or bar.closes_at != segments[-1][1]:
             raise ValueError('BAR_DOES_NOT_MATCH_DATED_EXCHANGE_SESSION')
         if (bar.next_session.isoformat() if bar.next_session else None) != calendar.get('next_session'):
             raise ValueError('NEXT_SESSION_NOT_FROM_VERIFIED_CALENDAR')
-        if bar.available_at < bar.closes_at or bar.source_hash not in self.manifest.get('source_object_hashes',[]):
-            raise ValueError('PUBLICATION_OR_SOURCE_OBJECT_UNKNOWN')
+        if bar.available_at < bar.closes_at or (bar.availability_basis != 'INTERNAL_CAPTURE_PREFIX'
+                and bar.source_hash not in self.manifest.get('source_object_hashes',[])):
+            raise ValueError('AVAILABILITY_OR_SOURCE_OBJECT_UNKNOWN')
         return bar
 
     def batches(self, guard=None):
@@ -139,7 +204,7 @@ class QualifiedInputs:
                     if market not in MARKETS or len(row.get('execution',[]))>6:
                         raise ValueError('FROZEN_MARKET_OR_EXPIRY_BOUNDARY')
                     try:
-                        signal=self._bar(row['signal'])
+                        signal=self._bar(row['signal'], guard=guard)
                     except (ValueError,TypeError,KeyError) as error:
                         self._quarantine(market,row['signal'].get('contract_id'),str(error))
                         continue
@@ -148,7 +213,7 @@ class QualifiedInputs:
                     execution=[]
                     for b in row['execution']:
                         try:
-                            execution.append(self._bar(b))
+                            execution.append(self._bar(b, guard=guard))
                         except (ValueError,TypeError,KeyError) as error:
                             self._quarantine(market,b.get('contract_id'),str(error))
                     execution=tuple(execution)

@@ -65,6 +65,13 @@ class SessionBar:
     # Supplied by the verified exchange calendar, not weekday arithmetic.
     next_session: date | None = None
     settlement_reference_at: datetime | None = None
+    # A locally reconstructed capture-time prefix has an internal simulation
+    # clock, not an observed publication by the vendor. Keep all clocks distinct.
+    availability_basis: str = "SUPPLIER_PUBLICATION"
+    input_cutoff: datetime | None = None
+    internal_calculated_at: datetime | None = None
+    supplier_published_at: datetime | None = None
+    temporal_evidence_hash: str | None = None
 
 
 @dataclass(frozen=True)
